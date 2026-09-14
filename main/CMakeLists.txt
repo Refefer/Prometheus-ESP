@@ -4,10 +4,16 @@ idf_component_register(
         "waveshare_rgb_lcd_port.c"
         "lvgl_port.c"
         "storage.c"
+        "secrets.c"
+        "wifi_mgr.c"
+        "ui_theme.c"
+        "ui_widgets.c"
+        "ui_kbd.c"
+        "ui_setup.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver esp_lcd esp_timer
-        esp_wifi esp_http_client esp-tls esp_netif
+        esp_wifi esp_http_client esp-tls esp_netif esp_event
         nvs_flash json app_update
         prom
 )

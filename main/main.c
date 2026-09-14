@@ -18,8 +18,15 @@
 
 #include "lvgl_port.h"
 #include "prom_text.h"
+#include "secrets.h"
 #include "storage.h"
+#include "ui_kbd.h"
+#include "ui_layout.h"
+#include "ui_setup.h"
+#include "ui_theme.h"
+#include "ui_widgets.h"
 #include "waveshare_rgb_lcd_port.h"
+#include "wifi_mgr.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -28,6 +35,7 @@ static const char *TAG = "app";
 
 static lv_obj_t *s_mem_label;
 static lv_obj_t *s_parse_label;
+static lv_obj_t *s_net_label;
 static char       s_smoke_result[96];
 
 /* ------------------------------------------------- PSRAM-preferring malloc */
@@ -135,47 +143,76 @@ static void mem_tick(lv_timer_t *t)
         ESP_LOGI(TAG, "%s", s_smoke_result);
     }
 
-    lv_label_set_text_fmt(
-        s_mem_label,
-        "SRAM free %u KB   PSRAM free %u KB   largest PSRAM block %u KB\n"
-        "config %u/%u KB   data %s",
-        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-        (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-        (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
-        (unsigned)(cfg_used / 1024), (unsigned)(cfg_total / 1024),
-        storage_data_ready() ? "mounted" : "unavailable");
+    if (s_net_label) {
+        char ip[16] = "";
+        int8_t rssi = 0;
+        wifi_mgr_info(ip, sizeof(ip), &rssi);
+        switch (wifi_mgr_state()) {
+        case WIFI_ST_CONNECTED:
+            label_set_fmt_if_changed(s_net_label, "%s   %d dBm", ip, (int)rssi);
+            text_color_if_changed(s_net_label, COL_OK);
+            break;
+        case WIFI_ST_CONNECTING:
+            label_set_if_changed(s_net_label, "connecting...");
+            text_color_if_changed(s_net_label, COL_WARN);
+            break;
+        case WIFI_ST_FAILED:
+            label_set_fmt_if_changed(s_net_label, "offline - %s",
+                                     wifi_mgr_fail_reason());
+            text_color_if_changed(s_net_label, COL_CRIT);
+            break;
+        default:
+            label_set_if_changed(s_net_label, "no network configured");
+            text_color_if_changed(s_net_label, COL_DIM);
+            break;
+        }
+    }
+
+    if (s_mem_label) {
+        label_set_fmt_if_changed(
+            s_mem_label,
+            "SRAM free %u KB   PSRAM free %u KB   largest PSRAM block %u KB\n"
+            "config %u/%u KB   data %s",
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
+            (unsigned)(cfg_used / 1024), (unsigned)(cfg_total / 1024),
+            storage_data_ready() ? "mounted" : "unavailable");
+    }
 }
 
-static void build_boot_ui(void)
+static void reopen_setup_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_setup_open();
+}
+
+/* The interim status screen shown when WiFi is already configured. The
+ * dashboard replaces this entirely once the tile framework lands. */
+static void build_status_ui(void)
 {
     lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0A0E14), 0);
+    lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
-    lv_obj_t *title = lv_label_create(scr);
+    lv_obj_t *title = make_label(scr, FONT_XL, COL_TEXT);
     lv_label_set_text(title, "Prometheus Panel");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE6EDF6), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
 
-    lv_obj_t *sub = lv_label_create(scr);
-    lv_label_set_text(sub, "M0 - panel, storage and parser up");
-    lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x4EA8FF), 0);
-    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 80);
+    s_net_label = make_label(scr, FONT_L, COL_ACCENT);
+    lv_obj_align(s_net_label, LV_ALIGN_TOP_MID, 0, 88);
 
-    s_parse_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_parse_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_parse_label, lv_color_hex(0x3FD08A), 0);
+    s_parse_label = make_label(scr, FONT_M, COL_OK);
     lv_obj_align(s_parse_label, LV_ALIGN_CENTER, 0, -10);
 
-    s_mem_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_mem_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_mem_label, lv_color_hex(0x93A1B5), 0);
+    s_mem_label = make_label(scr, FONT_M, COL_DIM);
     lv_obj_set_style_text_align(s_mem_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_mem_label, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_align(s_mem_label, LV_ALIGN_BOTTOM_MID, 0, -56);
 
-    mem_tick(NULL);
-    lv_timer_create(mem_tick, 1000, NULL);
+    lv_obj_t *b = make_btn(scr, LV_SYMBOL_SETTINGS "  Wi-Fi setup",
+                           reopen_setup_cb, NULL);
+    lv_obj_set_size(b, 240, BTN_H);
+    lv_obj_align(b, LV_ALIGN_BOTTOM_MID, 0, -8);
+
 }
 
 /* -------------------------------------------------------------------- main */
@@ -201,9 +238,27 @@ void app_main(void)
 
     run_parser_smoke(s_smoke_result, sizeof(s_smoke_result));
 
+    /* Radio up before the UI: with no credentials stored the station still
+     * starts, which is exactly what the setup wizard's scan needs. */
+    if (wifi_mgr_start() != ESP_OK) {
+        ESP_LOGE(TAG, "wifi stack failed to start");
+    }
+
     if (lvgl_port_lock(-1)) {
-        build_boot_ui();
-        lv_label_set_text(s_parse_label, s_smoke_result);
+        ui_kbd_init();
+        if (secrets_have_wifi()) {
+            build_status_ui();
+            lv_label_set_text(s_parse_label, s_smoke_result);
+        } else {
+            /* First boot: land straight in setup rather than showing a
+             * dashboard that cannot possibly have data. */
+            ui_setup_open();
+        }
+        /* Created regardless of which screen is up: the heartbeat is the only
+         * way to see this device's state over serial, since the native-USB
+         * console loses everything printed before a host attaches. */
+        mem_tick(NULL);
+        lv_timer_create(mem_tick, 1000, NULL);
         lvgl_port_unlock();
     }
 
