@@ -1,0 +1,32 @@
+# HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.
+# TYPE node_cpu_seconds_total counter
+node_cpu_seconds_total{cpu="0",mode="idle"} 891442.11
+node_cpu_seconds_total{cpu="0",mode="system"} 8104.22
+node_cpu_seconds_total{cpu="0",mode="user"} 41218.4
+node_cpu_seconds_total{cpu="1",mode="idle"} 889001.55
+node_cpu_seconds_total{cpu="1",mode="system"} 8011.02
+node_cpu_seconds_total{cpu="1",mode="user"} 39887
+# HELP node_load1 1m load average.
+# TYPE node_load1 gauge
+node_load1 0.84
+# HELP node_load5 5m load average.
+# TYPE node_load5 gauge
+node_load5 1.18
+# HELP node_memory_MemAvailable_bytes Memory information field MemAvailable_bytes.
+# TYPE node_memory_MemAvailable_bytes gauge
+node_memory_MemAvailable_bytes 4.93447168e+09
+# HELP node_filesystem_avail_bytes Filesystem space available to non-root users in bytes.
+# TYPE node_filesystem_avail_bytes gauge
+node_filesystem_avail_bytes{device="/dev/nvme0n1p2",fstype="ext4",mountpoint="/"} 4.42383616e+11
+node_filesystem_avail_bytes{device="/dev/nvme0n1p1",fstype="vfat",mountpoint="/boot"} 4.1234432e+08
+# HELP node_network_receive_bytes_total Network device statistic receive_bytes.
+# TYPE node_network_receive_bytes_total counter
+node_network_receive_bytes_total{device="eth0"} 1.2345678901e+13
+node_network_receive_bytes_total{device="lo"} 88123
+# HELP node_hwmon_temp_celsius Hardware monitor for temperature.
+# TYPE node_hwmon_temp_celsius gauge
+node_hwmon_temp_celsius{chip="platform_coretemp_0",sensor="temp1"} 61
+node_hwmon_temp_celsius{chip="platform_coretemp_0",sensor="temp9"} NaN
+# HELP up 1 if the target is reachable.
+# TYPE up gauge
+up{instance="nas:9100",job="node"} 1

@@ -1,0 +1,28 @@
+# 16 MB flash (ESP32-S3-WROOM-1 N16R8).
+#
+# nvs     0x8000 rather than the usual 0x6000: it holds the WiFi driver's own
+#         entries (~2KB), the STA credentials, and up to 16 per-endpoint auth
+#         secrets at <=512B each. That fits in 24KB but leaves NVS no free
+#         pages to compact with, and an NVS that cannot compact starts failing
+#         writes. 8KB of flash is the cheapest insurance in this table.
+#
+# ota_0/1 reserved from day one even though v1 ships without the updater.
+#         Adding OTA later means changing this table, which means an
+#         erase-and-reflash over USB, which means unmounting a panel that by
+#         then is screwed to a wall.
+#
+# config  LittleFS, holds config.json + .bak + .new + migration backups. The
+#         atomic rename over an existing file is the primitive that makes
+#         "settings survive a power cut" true; SPIFFS has no such guarantee.
+#
+# data    LittleFS, for history snapshots (deferred) and anything else bulky.
+#
+# 0x720000 + 0x8E0000 = 0x1000000 exactly: no waste at the tail.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x8000,
+phy_init,   data, phy,      0x11000,  0x1000,
+otadata,    data, ota,      0x12000,  0x2000,
+ota_0,      app,  ota_0,    0x20000,  0x300000,
+ota_1,      app,  ota_1,    0x320000, 0x300000,
+config,     data, littlefs, 0x620000, 0x100000,
+data,       data, littlefs, 0x720000, 0x8E0000,

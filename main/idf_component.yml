@@ -1,0 +1,15 @@
+dependencies:
+  idf:
+    version: ">=5.3.0"
+
+  # LVGL 9 changed APIs; this codebase uses v8 idioms throughout (and lv_scale,
+  # which v9 introduces, is deliberately not used -- lv_arc/lv_meter instead)
+  lvgl/lvgl:
+    version: ">8.3.9,<9"
+    public: true
+
+  espressif/esp_lcd_touch_gt911: "^1"
+
+  # LittleFS, not SPIFFS: atomic rename over an existing file is the primitive
+  # that makes "config survives a power cut" true rather than probable.
+  joltwallet/littlefs: "^1"

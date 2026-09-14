@@ -1,0 +1,47 @@
+# Deliberately awkward input. Every line here broke something during design.
+# HELP simple_gauge A plain gauge.
+# TYPE simple_gauge gauge
+simple_gauge 42
+# TYPE esc_metric gauge
+esc_metric{path="a\\b",quote="say \"hi\"",nl="line1\nline2"} 1
+# TYPE spaced gauge
+spaced { a = "1" , b = "2" , } 3.5
+# TYPE specials gauge
+specials{k="v"} +Inf
+specials{k="w"} -Inf
+specials{k="x"} NaN
+specials{k="y"} 1.5e-9
+specials{k="z"} -0
+# TYPE with_ts counter
+with_ts_total 99 1620000000000
+# TYPE exemplar_metric counter
+exemplar_metric_total 17 1620000000000 # {trace_id="abc123"} 1.0 1620000000000
+# TYPE hash_in_label gauge
+hash_in_label{note="# not a comment"} 7
+# TYPE tabbed gauge
+tabbed	5
+# HELP escaped_help Help with \\ backslash and \n newline.
+# TYPE escaped_help gauge
+escaped_help 1
+# TYPE lat_seconds histogram
+lat_seconds_bucket{le="0.005"} 10
+lat_seconds_bucket{le="0.01"} 25
+lat_seconds_bucket{le="0.025"} 60
+lat_seconds_bucket{le="+Inf"} 80
+lat_seconds_sum 1.25
+lat_seconds_count 80
+# TYPE rpc_latency summary
+rpc_latency{quantile="0.5"} 0.012
+rpc_latency{quantile="0.99"} 0.31
+rpc_latency_sum 55.2
+rpc_latency_count 1000
+# OpenMetrics dialect: TYPE names the family, the sample carries _total
+# TYPE http_requests counter
+http_requests_total{method="post",code="200"} 1027
+# A TYPE must not leak onto an unrelated metric that merely shares a prefix
+# TYPE foo gauge
+foo_bar_baz 1
+this_line_has_no_type 5
+# a bare comment that is not HELP or TYPE
+   indented_metric 3
+empty_labels{} 8

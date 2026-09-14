@@ -1,0 +1,73 @@
+# Waveshare ESP32-S3-Touch-LCD-7 (plain, 800x480), ESP32-S3-WROOM-1 N16R8.
+# Display/PSRAM flags cribbed from the waveshare-ips-esp32 scaffold, which
+# cribbed them from theqkash/esp32flight, which ships on this exact board.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 16MB quad flash, 8MB octal PSRAM. 80MHz on both: Waveshare's benchmark uses
+# the experimental 120MHz PSRAM flag for peak FPS; 80MHz is the stable choice.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Run code and rodata out of PSRAM to keep internal SRAM for data. Costs
+# ~1.6MB of PSRAM; measure the real number on the diagnostics readout before
+# deciding to keep these (see the plan's sizing table).
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+# malloc() placement policy: allocations under 4KB stay in fast internal SRAM.
+#
+# TRAP: this silently sends the parser line buffer, the HTTP client's rx/tx
+# buffers and every small store allocation to the scarce internal heap. Every
+# data-layer allocation in this project must therefore call
+# heap_caps_malloc(n, MALLOC_CAP_SPIRAM) explicitly rather than bare malloc().
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Custom table: dual OTA slots + LittleFS config/data partitions
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The RGB scanout refill ISR must survive moments when the flash cache is
+# disabled (e.g. NVS writes), or the panel drifts
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=n
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- TLS -------------------------------------------------------------------
+# Endpoints are usually plain http on a LAN, but https must work when it is
+# asked for. The cert bundle costs ~64KB of a 16MB part.
+CONFIG_ESP_TLS_INSECURE=n
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# Several concurrent TLS sessions (multiple endpoints + a discovery probe):
+# shrink per-connection RAM and push the buffers out of the internal heap, or
+# ssl_setup starts failing with allocation errors.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# --- LVGL v8 ---------------------------------------------------------------
+# LV_MEM_CUSTOM_ALLOC/FREE/REALLOC themselves are -D flags in the root
+# CMakeLists.txt; these two switch LVGL over to using them.
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_MEM_CUSTOM_INCLUDE="esp_heap_caps.h"
+CONFIG_LV_MEMCPY_MEMSET_STD=y
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
+# UI text tiers. The built-in Montserrat charset (0x20-0x7F + degree + bullet
+# + the LVGL symbol glyphs) is the whole UI charset, so no lv_font_conv step
+# is needed for text. Only the large numeric faces are generated (see
+# tools/gen_fonts.sh) because the built-ins stop at 48 and carry an ASCII set
+# we do not need at those sizes.
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
