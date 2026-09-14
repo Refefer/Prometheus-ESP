@@ -52,14 +52,28 @@ that debugging them by flashing a board and squinting at a 7" panel would
 dominate the schedule.
 
 ```sh
-make -C components/prom/test        # build and run
+make -C components/prom/test        # parser, identity, rate and quantile math
 make -C components/prom/test asan   # the same under ASan + UBSan
+
+make -C host                        # ui_fmt (formatting, unit inference)
+make -C host asan
 ```
 
 The headline test is **replay equivalence**: parsing a corpus file as one
 buffer must produce a byte-identical event stream to parsing it one byte at a
 time, and again in 7-byte chunks. A real HTTP body arrives in arbitrary chunks,
 and a token split across two of them is the failure nobody reproduces by hand.
+
+`host/` covers the pure-C parts of `main/`. Two invariants there are worth
+knowing about, because both fail silently on a real panel rather than loudly:
+
+- **Prefix hysteresis.** A value wobbling around 1000 must not flap between
+  `999` and `1.00k`. Each flap is a repaint, and it reads as the *number*
+  being unstable rather than the display.
+- **The digits-only font charset.** The large display faces carry only
+  `" !%+,-./0-9:"`. A glyph missing from an LVGL font draws as *nothing*, so a
+  formatter that put a letter in the numeric field would make the value vanish
+  from the tile. The test sweeps 112 value/mode combinations to hold it.
 
 To add a real capture to the corpus:
 

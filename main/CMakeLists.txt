@@ -7,6 +7,7 @@ idf_component_register(
         "secrets.c"
         "wifi_mgr.c"
         "ui_theme.c"
+        "ui_fmt.c"
         "ui_widgets.c"
         "ui_kbd.c"
         "ui_setup.c"
