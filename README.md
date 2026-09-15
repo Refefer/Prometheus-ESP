@@ -25,6 +25,7 @@ Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 | M1 exposition parser + host tests | done |
 | M2 first real number from a real exporter | done |
 | M7 on-device WiFi setup (reordered ahead) | done |
+| tile renderers: chart, sparkline, gauge, bar, stat, status | done |
 
 ## Build and flash
 

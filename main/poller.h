@@ -25,6 +25,10 @@ typedef struct {
     char   label[POLLER_NAME_MAX];   /* display name */
     char   num[POLLER_TEXT_MAX];     /* formatted value */
     char   suffix[POLLER_TEXT_MAX];  /* unit */
+    float  value;                    /* the displayed quantity, unformatted --
+                                      * charts, gauges and bars need a number,
+                                      * not a string */
+    bool   numeric_only;             /* num[] is safe for the digit faces */
     bool   valid;                    /* false while warming up or absent */
     bool   warming;                  /* counter with no baseline yet */
     bool   restarted;                /* counter reset seen on this scrape */
@@ -46,8 +50,13 @@ typedef struct {
 esp_err_t poller_start(const char *url, int interval_s);
 
 /* Copies the current snapshot. Safe from the LVGL task; holds the mutex for
- * microseconds. */
+ * microseconds. Safe to call before poller_start(), which yields a zeroed
+ * snapshot rather than crashing -- the UI is built before the poller runs. */
 void poller_snapshot(poller_snap_t *out);
+
+/* The display label for a watch slot. Backed by a static table, so it is
+ * valid at any time including before poller_start(). */
+const char *poller_label(int idx);
 
 /* Cheap change check for the UI timer, no lock taken. */
 uint32_t poller_generation(void);

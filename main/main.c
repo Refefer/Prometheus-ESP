@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include <math.h>
 #include "lvgl.h"
 
 #include "lvgl_port.h"
@@ -26,6 +27,7 @@
 #include "ui_layout.h"
 #include "ui_setup.h"
 #include "ui_theme.h"
+#include "ui_tile.h"
 #include "ui_widgets.h"
 #include "waveshare_rgb_lcd_port.h"
 #include "wifi_mgr.h"
@@ -131,75 +133,79 @@ static void reopen_setup_cb(lv_event_t *e)
  * the data path. The watch list behind it is still fixed -- the metric store
  * and the browser replace that; the layout and the refresh path stay.
  */
-static lv_obj_t *s_tile_val[POLLER_MAX_WATCH];
-static lv_obj_t *s_tile_suf[POLLER_MAX_WATCH];
-static lv_obj_t *s_tile_ttl[POLLER_MAX_WATCH];
-static lv_obj_t *s_hdr_status;
-static lv_obj_t *s_ftr_left;
-static lv_obj_t *s_ftr_right;
-static uint32_t  s_seen_gen = UINT32_MAX;
+/*
+ * The dashboard.
+ *
+ * Twelve grid cells filled by eight metrics using spans: a 2x2 chart, a 2x1
+ * sparkline, a gauge, a bar and four stat tiles. The watch list behind it is
+ * still fixed -- the metric browser replaces that -- but everything from the
+ * tile shell down is the production path.
+ */
+static const tile_spec_t k_tiles[POLLER_MAX_WATCH] = {
+    /* title comes from the poller; kind, position, span, range, thresholds */
+    { NULL, TILE_CHART,  0, 0, 2, 2, NAN, NAN, NAN,  NAN, false },  /* Gen tok/s */
+    { NULL, TILE_STAT,   0, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* Running   */
+    { NULL, TILE_STAT,   1, 2, 1, 1, NAN, NAN, 8.0f, 20.0f, false },/* Queued    */
+    { NULL, TILE_GAUGE,  2, 1, 1, 1, 0.0f, 100.0f, 80.0f, 95.0f, false }, /* KV used */
+    { NULL, TILE_BAR,    3, 1, 1, 1, 0.0f, 16.0f, NAN, NAN, false },/* KV memory */
+    { NULL, TILE_SPARK,  2, 0, 2, 1, NAN, NAN, NAN,  NAN, false },  /* Decode    */
+    { NULL, TILE_STAT,   2, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* TTFT p99  */
+    { NULL, TILE_STAT,   3, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* E2E p99   */
+};
+
+static tile_inst_t *s_tiles[POLLER_MAX_WATCH];
+static tile_spec_t  s_specs[POLLER_MAX_WATCH];
+static lv_obj_t    *s_hdr_status;
+static lv_obj_t    *s_ftr_left;
+static lv_obj_t    *s_ftr_right;
+static uint32_t     s_seen_gen = UINT32_MAX;
 
 static void build_dashboard(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
-    /* header */
     lv_obj_t *title = make_label(scr, FONT_L, COL_TEXT);
-    lv_label_set_text(title, "Prometheus Panel");
-    lv_obj_set_pos(title, GRID_MX, 10);
+    lv_label_set_text(title, "Inference");
+    lv_obj_set_pos(title, GRID_MX, 8);
 
     s_hdr_status = make_label(scr, FONT_S, COL_DIM);
     lv_obj_set_pos(s_hdr_status, 300, 14);
 
     lv_obj_t *gear = make_btn(scr, LV_SYMBOL_SETTINGS, reopen_setup_cb, NULL);
-    lv_obj_set_size(gear, 52, 32);
+    lv_obj_set_size(gear, 52, 30);
     lv_obj_set_pos(gear, SCR_W - 52 - GRID_MX, 4);
 
     lv_obj_t *div = make_divider(scr, SCR_W);
     lv_obj_set_pos(div, 0, HEADER_H - 1);
 
-    /* tiles: 4 columns x 2 rows of 1x1 cells */
+    /* Titles come from the poller's watch table, which is static and valid
+     * before the task starts -- the dashboard is built first. */
     for (int i = 0; i < POLLER_MAX_WATCH; i++) {
-        int col = i % GRID_COLS, row = i / GRID_COLS;
-        lv_obj_t *card = make_card(scr);
-        lv_obj_set_size(card, TILE_W(1), TILE_H(1));
-        lv_obj_set_pos(card, TILE_X(col), TILE_Y(row));
-
-        s_tile_ttl[i] = make_label(card, FONT_S, COL_DIM);
-        lv_label_set_long_mode(s_tile_ttl[i], LV_LABEL_LONG_DOT);
-        lv_obj_set_width(s_tile_ttl[i], TILE_W(1) - 2 * PAD_S);
-        lv_obj_set_pos(s_tile_ttl[i], 0, 0);
-
-        /* FONT_XL stands in for the generated digits-only NUM_M face, which
-         * arrives with the tile renderers. */
-        s_tile_val[i] = make_label(card, FONT_XL, COL_TEXT);
-        lv_obj_set_pos(s_tile_val[i], 0, 34);
-
-        s_tile_suf[i] = make_label(card, FONT_M, COL_DIM);
-        lv_obj_set_pos(s_tile_suf[i], 0, 82);
+        s_specs[i] = k_tiles[i];
+        s_specs[i].title = poller_label(i);
+        s_tiles[i] = tile_create(scr, &s_specs[i]);
     }
 
-    /* footer */
     lv_obj_t *fdiv = make_divider(scr, SCR_W);
     lv_obj_set_pos(fdiv, 0, FOOTER_Y);
 
     s_ftr_left = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_ftr_left, GRID_MX, FOOTER_Y + 6);
+    lv_obj_set_pos(s_ftr_left, GRID_MX, FOOTER_Y + 7);
 
     s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_ftr_right, SCR_W - 320, FOOTER_Y + 6);
+    lv_obj_set_pos(s_ftr_right, SCR_W - 330, FOOTER_Y + 7);
 }
 
 /*
  * Runs in the LVGL task. Compares the poller's generation with != rather than
- * > so a uint32 wrap is a non-event, and repaints regardless of whether data
- * changed, because the age readout has to keep counting up when it does not.
+ * > so a uint32 wrap is a non-event, and still repaints the age readout when
+ * no new data arrived, because "updated 40s ago" has to keep counting.
  */
-static void dashboard_tick(lv_timer_t *t)
+static void dashboard_tick(lv_timer_t *timer)
 {
-    (void)t;
-    if (s_tile_val[0] == NULL) return;
+    (void)timer;
+    if (s_tiles[0] == NULL) return;
 
     poller_snap_t snap;
     poller_snapshot(&snap);
@@ -208,22 +214,16 @@ static void dashboard_tick(lv_timer_t *t)
         s_seen_gen = snap.generation;
         for (int i = 0; i < snap.n && i < POLLER_MAX_WATCH; i++) {
             const poller_metric_t *m = &snap.m[i];
-            label_set_if_changed(s_tile_ttl[i], m->label);
-            if (m->valid) {
-                label_set_if_changed(s_tile_val[i], m->num);
-                label_set_if_changed(s_tile_suf[i], m->suffix);
-                text_color_if_changed(s_tile_val[i], COL_TEXT);
-            } else {
-                /* Warming up is not the same as broken, and neither is the
-                 * same as zero -- a zero on the first poll of a counter is a
-                 * lie that looks exactly like a reading. */
-                label_set_if_changed(s_tile_val[i], "--");
-                label_set_if_changed(s_tile_suf[i],
-                                     m->restarted ? "restarted"
-                                                  : m->warming ? "warming up"
-                                                               : "no data");
-                text_color_if_changed(s_tile_val[i], COL_STALE);
-            }
+            tile_data_t d = {
+                .valid        = m->valid,
+                .warming      = m->warming,
+                .restarted    = m->restarted,
+                .value        = m->value,
+                .num          = m->num,
+                .suffix       = m->suffix,
+                .numeric_only = m->numeric_only,
+            };
+            tile_update(s_tiles[i], &d);
         }
 
         char ip[16] = ""; int8_t rssi = 0;
@@ -233,24 +233,23 @@ static void dashboard_tick(lv_timer_t *t)
                               wifi_mgr_is_connected() ? COL_OK : COL_CRIT);
 
         label_set_fmt_if_changed(s_ftr_right,
-                                 "%u samples   %u B   %u ms   SRAM %uK  PSRAM %uK",
-                                 (unsigned)snap.samples, (unsigned)snap.body_bytes,
+                                 "%u samples  %u KB  %u ms   SRAM %uK  PSRAM %uK",
+                                 (unsigned)snap.samples,
+                                 (unsigned)(snap.body_bytes / 1024),
                                  (unsigned)snap.latency_ms,
                                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
 
-    /* Age ticks every second even when nothing new arrives. */
     poller_snap_t s2;
     poller_snapshot(&s2);
     if (s2.last_ok_ms > 0) {
         int age = (int)((esp_timer_get_time() / 1000 - s2.last_ok_ms) / 1000);
         label_set_fmt_if_changed(s_ftr_left, "updated %ds ago   %s", age, s2.status);
-        text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
     } else {
         label_set_fmt_if_changed(s_ftr_left, "%s", s2.status);
-        text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
     }
+    text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
 }
 
 /* -------------------------------------------------------------------- main */

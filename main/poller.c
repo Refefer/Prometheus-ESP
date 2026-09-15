@@ -267,10 +267,15 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         }
 
         if (isfinite(shown)) {
-            bool numeric;
+            bool numeric = true;
             ui_fmt_value(shown, w->fmt, w->unit, &s_state[i].fmt,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
+            /* Percent modes scale for display; charts and gauges want the
+             * same quantity the label shows, so they see the scaled one. */
+            m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
+                                              : (float)shown;
+            m->numeric_only = numeric;
             m->valid = true;
         }
     }
@@ -401,10 +406,31 @@ esp_err_t poller_start(const char *url, int interval_s)
 void poller_snapshot(poller_snap_t *out)
 {
     if (out == NULL) return;
+
+    /*
+     * The UI is built before the poller task starts, so this must be safe
+     * with no mutex yet. Returning a zeroed snapshot with the labels filled
+     * in lets the dashboard lay itself out before any data exists.
+     */
+    if (s_mux == NULL) {
+        memset(out, 0, sizeof(*out));
+        out->n = WATCH_N;
+        for (int i = 0; i < WATCH_N; i++) {
+            strncpy(out->m[i].label, k_watch[i].label, sizeof(out->m[i].label) - 1);
+        }
+        strncpy(out->status, "starting", sizeof(out->status) - 1);
+        return;
+    }
+
     if (xSemaphoreTake(s_mux, pdMS_TO_TICKS(50)) == pdTRUE) {
         *out = s_snap;
         xSemaphoreGive(s_mux);
     }
+}
+
+const char *poller_label(int idx)
+{
+    return (idx >= 0 && idx < WATCH_N) ? k_watch[idx].label : "";
 }
 
 uint32_t poller_generation(void)
