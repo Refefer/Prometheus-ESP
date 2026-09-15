@@ -53,6 +53,17 @@ static int decimals_for(double a)
     return 3;
 }
 
+/* As above, but a series that has only ever produced whole numbers prints as
+ * a whole number -- see fmt_state_t.seen_fraction. */
+static int decimals_tracked(double shown, fmt_state_t *st)
+{
+    if (st != NULL) {
+        if (shown != floor(shown)) st->seen_fraction = true;
+        if (!st->seen_fraction && fabs(shown) < 1e9) return 0;
+    }
+    return decimals_for(shown);
+}
+
 /*
  * Choose a prefix index for `v`, honouring the previous choice in `st`.
  * Returns the index; *scaled receives the value divided by that prefix.
@@ -170,7 +181,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     case FMT_RATE_IEC: {
         double scaled = v;
         int e = pick_exp(v, 1024.0, 0, IEC_MAX, st, &scaled);
-        int dp = decimals_for(scaled);
+        int dp = decimals_tracked(scaled, st);
         if (e == 0) dp = 0;                       /* whole bytes, always */
         if (st) st->decimals = (int8_t)dp;
         snprintf(num, num_cap, "%.*f", dp, scaled);
@@ -185,7 +196,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     case FMT_RATE_SI: {
         double scaled = v;
         int e = pick_exp(v, 1000.0, SI_MIN, SI_MAX, st, &scaled);
-        int dp = decimals_for(scaled);
+        int dp = decimals_tracked(scaled, st);
         if (st) st->decimals = (int8_t)dp;
         snprintf(num, num_cap, "%.*f", dp, scaled);
         char u[16];
@@ -199,7 +210,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     case FMT_RAW:
     case FMT_AUTO:
     default: {
-        int dp = decimals_for(v);
+        int dp = decimals_tracked(v, st);
         if (st) { st->decimals = (int8_t)dp; st->valid = true; st->exp = 0; }
         snprintf(num, num_cap, "%.*f", dp, v);
         safe_copy(suffix, suffix_cap, base_unit);

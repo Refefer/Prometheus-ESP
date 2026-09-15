@@ -116,6 +116,44 @@ static void test_hysteresis(void)
     CHECK(strcmp(suf, "M") == 0, "zero holds the prefix (suf=\"%s\")", suf);
 }
 
+/*
+ * Counts are integers. "3.00 req" and "0.000 req" read as a broken display,
+ * which is exactly how this looked against a real inference server's
+ * num_running_reqs / num_queue_reqs.
+ */
+static void test_integral_series(void)
+{
+    printf("integral series\n");
+    char num[32], suf[16]; bool numeric;
+
+    fmt_state_t st = {0};
+    ui_fmt_value(3.0, FMT_RAW, "", &st, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "3") == 0, "3 -> \"%s\", want \"3\"", num);
+    ui_fmt_value(0.0, FMT_RAW, "", &st, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "0") == 0, "0 -> \"%s\", want \"0\"", num);
+    ui_fmt_value(12.0, FMT_RAW, "", &st, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "12") == 0, "12 -> \"%s\"", num);
+
+    /* One fractional sample switches the series to decimals permanently, so a
+     * measurement that merely lands on a round number is not mistaken for a
+     * count. */
+    ui_fmt_value(0.84, FMT_RAW, "", &st, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "0.840") == 0, "0.84 -> \"%s\"", num);
+    ui_fmt_value(1.0, FMT_RAW, "", &st, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "1.00") == 0, "after a fraction, 1.0 keeps decimals -> \"%s\"", num);
+
+    /* Without state there is nothing to track, so the sig-fig rule stands. */
+    ui_fmt_value(3.0, FMT_RAW, "", NULL, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "3.00") == 0, "stateless keeps sig-figs -> \"%s\"", num);
+
+    /* Scaling still applies: an integral byte count is not forced to 0 dp
+     * once it has a prefix. */
+    fmt_state_t st2 = {0};
+    ui_fmt_value(11.4 * 1073741824.0, FMT_IEC, "", &st2,
+                 num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "11.4") == 0, "scaled IEC keeps decimals -> \"%s\"", num);
+}
+
 static void test_duration(void)
 {
     printf("durations\n");
@@ -250,6 +288,7 @@ int main(void)
     test_sigfigs();
     test_si_iec();
     test_hysteresis();
+    test_integral_series();
     test_duration();
     test_percent_delta();
     test_nonfinite();

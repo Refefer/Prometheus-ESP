@@ -301,7 +301,7 @@ void app_main(void)
     if (secrets_have_wifi()) {
         /* Milestone scope: a fixed endpoint. The editor and the stored
          * endpoint list replace this argument, not the call. */
-        poller_start("http://192.168.1.2:9100/metrics", 5);
+        poller_start("http://192.168.1.60:12345/metrics", 5);
     }
 
     ESP_LOGI(TAG, "boot complete: SRAM %u KB free, PSRAM %u KB free",

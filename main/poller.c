@@ -39,24 +39,28 @@ typedef struct {
 } watch_t;
 
 static const watch_t k_watch[] = {
-    { "Load 1m",   "node_load1",                      NULL, NULL,
-      W_GAUGE, FMT_RAW, "", 0 },
-    { "Mem avail", "node_memory_MemAvailable_bytes",  NULL, NULL,
-      W_GAUGE, FMT_IEC, "", 0 },
-    { "CPU temp",  "node_hwmon_temp_celsius",         "sensor", "temp1",
-      W_GAUGE, FMT_RAW, "\xC2\xB0" "C", 0 },
-    { "CPU user",  "node_cpu_seconds_total",          "mode", "user",
-      W_RATE, FMT_PCT_01, "", 0 },
-    /* The float32 trap in one line: this counter is ~1.2e13, and a float
-     * subtraction of consecutive samples would be exactly zero. */
-    { "Net rx",    "node_network_receive_bytes_total", "device", "eth0",
-      W_RATE, FMT_RATE_IEC, "", 0 },
-    { "Requests",  "http_requests_total",             "code", "200",
-      W_RATE, FMT_RATE_SI, "", 0 },
-    { "Latency p99","http_request_duration_seconds",  NULL, NULL,
+    { "Gen tok/s",  "sglang:gen_throughput",           NULL, NULL,
+      W_GAUGE, FMT_SI, "tok/s", 0 },
+    { "Running",    "sglang:num_running_reqs",         NULL, NULL,
+      W_GAUGE, FMT_RAW, "req", 0 },
+    { "Queued",     "sglang:num_queue_reqs",           NULL, NULL,
+      W_GAUGE, FMT_RAW, "req", 0 },
+    /* token_usage is a confirmed 0..1 ratio. cache_hit_rate reads 0.0 right
+     * now and its HELP does not say whether it is a ratio or a percentage,
+     * so it is deliberately not on this list -- guessing the scale would put
+     * a number on the wall that is wrong by 100x. */
+    { "KV used",    "sglang:token_usage",              NULL, NULL,
+      W_GAUGE, FMT_PCT_01, "", 0 },
+    { "KV memory",  "sglang:kv_cache_memory_usage_gb", NULL, NULL,
+      W_GAUGE, FMT_RAW, "GB", 0 },
+    { "Decode",     "sglang:realtime_tokens_total",    "mode", "decode",
+      W_RATE, FMT_RATE_SI, "tok", 0 },
+    /* Both latency families are split by is_streaming; without the filter the
+     * two distributions would be summed into one that never existed. */
+    { "TTFT p99",   "sglang:time_to_first_token_seconds", "is_streaming", "true",
       W_QUANTILE, FMT_DURATION, "", 0.99 },
-    { "Target",    "up",                              NULL, NULL,
-      W_GAUGE, FMT_BOOL, "", 0 },
+    { "E2E p99",    "sglang:e2e_request_latency_seconds", "is_streaming", "true",
+      W_QUANTILE, FMT_DURATION, "", 0.99 },
 };
 #define WATCH_N ((int)(sizeof(k_watch) / sizeof(k_watch[0])))
 
@@ -131,6 +135,14 @@ static bool on_sample(void *ctx, const prom_sample_t *s)
             /* Collect the family's cumulative buckets; the quantile is
              * derived once the whole body has been seen. */
             if (s->role != PROM_ROLE_BUCKET || !base_is(s, w->metric)) continue;
+            /*
+             * The label filter applies to buckets as much as to plain
+             * samples. A family routinely carries several label sets -- an
+             * LLM server splits its latency histogram by is_streaming, for
+             * instance -- and merging their buckets produces a quantile over
+             * a distribution that does not exist.
+             */
+            if (!labels_match(s, w)) continue;
             if (!prom_is_num(s->value)) continue;
             watch_scratch_t *sc = &s_scratch[i];
             double bound = prom_is_num(s->le) ? s->le.num

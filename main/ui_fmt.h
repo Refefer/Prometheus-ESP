@@ -48,9 +48,21 @@ typedef enum {
  * change repaints, needlessly expensive.
  */
 typedef struct {
-    int8_t  exp;        /* current prefix index */
+    int8_t  exp;            /* current prefix index */
     int8_t  decimals;
     bool    valid;
+    /*
+     * Set once a fractional value has been seen, and never cleared.
+     *
+     * Request counts, queue depths and replica counts are integers, and
+     * rendering them with three significant digits gives "3.00 req" and
+     * "0.000 req", which reads as broken. Tracking integrality across samples
+     * lets a genuinely integral series print as an integer while a
+     * measurement that merely happens to land on a round number keeps its
+     * decimals from the first fractional sample onward. It converges after
+     * one sample and never oscillates, because the flag is one-way.
+     */
+    bool    seen_fraction;
 } fmt_state_t;
 
 /*
