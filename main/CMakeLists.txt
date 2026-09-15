@@ -20,6 +20,7 @@ idf_component_register(
         "ui_kbd.c"
         "ui_setup.c"
         "ui_endpoints.c"
+        "ui_browser.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver esp_lcd esp_timer

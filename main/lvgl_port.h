@@ -26,7 +26,10 @@ extern "C" {
 
 #define LVGL_PORT_TASK_MAX_DELAY_MS (500)
 #define LVGL_PORT_TASK_MIN_DELAY_MS (10)
-#define LVGL_PORT_TASK_STACK_SIZE   (6 * 1024)
+/* 6KB was right for the scaffold's one-button demo. This UI builds tiles,
+ * runs the keyboard, and hosts callbacks that touch config; the measured
+ * high-water mark left under 2KB of headroom. */
+#define LVGL_PORT_TASK_STACK_SIZE   (10 * 1024)
 #define LVGL_PORT_TASK_PRIORITY     (2)
 /* Core 1: keep rendering away from core 0, where WiFi/BT and most system
  * tasks run by default */

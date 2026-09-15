@@ -26,6 +26,7 @@
 #include "storage.h"
 #include "ui_kbd.h"
 #include "ui_layout.h"
+#include "ui_browser.h"
 #include "ui_endpoints.h"
 #include "ui_setup.h"
 #include "ui_theme.h"
@@ -123,22 +124,12 @@ static void run_parser_smoke(char *out, size_t cap)
 /* ----------------------------------------------------------------- boot UI */
 
 
+static void rebuild_dashboard(void);   /* defined with the dashboard below */
+
 static void reopen_setup_cb(lv_event_t *e)
 {
     (void)e;
     ui_setup_open();
-}
-
-static lv_obj_t *s_hdr_title;
-
-static void rebuild_dashboard(void)
-{
-    /* The editor overlay is gone and the tiles underneath are intact, so only
-     * the header caption can have changed. */
-    config_t *c = config_get();
-    label_set_if_changed(s_hdr_title,
-                         (c->n_endpoints && c->endpoints[0].name[0])
-                         ? c->endpoints[0].name : "Prometheus Panel");
 }
 
 static void endpoints_cb(lv_event_t *e)
@@ -156,37 +147,67 @@ static void endpoints_cb(lv_event_t *e)
 /*
  * The dashboard.
  *
- * Twelve grid cells filled by eight metrics using spans: a 2x2 chart, a 2x1
- * sparkline, a gauge, a bar and four stat tiles. The watch list behind it is
- * still fixed -- the metric browser replaces that -- but everything from the
- * tile shell down is the production path.
+ * Tiles come from the stored panels, and the poller's watch slots are in the
+ * same order, so slot i is panel i. Nothing about which metrics appear is
+ * compiled in any more.
  */
-static const tile_spec_t k_tiles[POLLER_MAX_WATCH] = {
-    /* title comes from the poller; kind, position, span, range, thresholds */
-    { NULL, TILE_CHART,  0, 0, 2, 2, NAN, NAN, NAN,  NAN, false },  /* Gen tok/s */
-    { NULL, TILE_STAT,   0, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* Running   */
-    { NULL, TILE_STAT,   1, 2, 1, 1, NAN, NAN, 8.0f, 20.0f, false },/* Queued    */
-    { NULL, TILE_GAUGE,  2, 1, 1, 1, 0.0f, 100.0f, 80.0f, 95.0f, false }, /* KV used */
-    { NULL, TILE_BAR,    3, 1, 1, 1, 0.0f, 16.0f, NAN, NAN, false },/* KV memory */
-    { NULL, TILE_SPARK,  2, 0, 2, 1, NAN, NAN, NAN,  NAN, false },  /* Decode    */
-    { NULL, TILE_STAT,   2, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* TTFT p99  */
-    { NULL, TILE_STAT,   3, 2, 1, 1, NAN, NAN, NAN,  NAN, false },  /* E2E p99   */
-};
-
-static tile_inst_t *s_tiles[POLLER_MAX_WATCH];
-static tile_spec_t  s_specs[POLLER_MAX_WATCH];
+static tile_inst_t *s_tiles[CFG_MAX_PANELS];
+static tile_spec_t  s_specs[CFG_MAX_PANELS];
+static int          s_tile_n;
+static lv_obj_t    *s_hdr_title;
 static lv_obj_t    *s_hdr_status;
 static lv_obj_t    *s_ftr_left;
 static lv_obj_t    *s_ftr_right;
+static lv_obj_t    *s_empty;
 static uint32_t     s_seen_gen = UINT32_MAX;
+
+static void build_tiles(lv_obj_t *scr)
+{
+    for (int i = 0; i < s_tile_n; i++) {
+        if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
+    }
+    s_tile_n = 0;
+
+    const config_t *c = config_get();
+    for (int i = 0; i < c->n_panels && s_tile_n < CFG_MAX_PANELS; i++) {
+        const cfg_panel_t *p = &c->panels[i];
+        if (p->sel[0] == '\0') continue;
+        if (p->screen != 0) continue;      /* one screen for now */
+
+        tile_spec_t *sp = &s_specs[s_tile_n];
+        memset(sp, 0, sizeof(*sp));
+        sp->title = p->title[0] ? p->title : p->sel;
+        sp->kind  = p->kind;
+        sp->col   = p->col;  sp->row = p->row;
+        sp->w     = p->w ? p->w : 1;
+        sp->h     = p->h ? p->h : 1;
+        sp->vmin  = p->vmin; sp->vmax = p->vmax;
+        sp->warn  = p->warn; sp->crit = p->crit;
+        sp->lower_is_worse = p->lower_is_worse;
+        s_tiles[s_tile_n] = tile_create(scr, sp);
+        s_tile_n++;
+    }
+
+    /* An empty dashboard has to say why, or it reads as a fault. */
+    hidden_if_changed(s_empty, s_tile_n > 0);
+}
+
+static void browser_closed(void);
+
+static void browse_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_browser_open(browser_closed);
+}
 
 static void build_dashboard(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
+    const config_t *c = config_get();
+
     s_hdr_title = make_label(scr, FONT_L, COL_TEXT);
-    config_t *c = config_get();
     lv_label_set_text(s_hdr_title, (c->n_endpoints && c->endpoints[0].name[0])
                                    ? c->endpoints[0].name : "Prometheus Panel");
     lv_obj_set_pos(s_hdr_title, GRID_MX, 8);
@@ -194,11 +215,13 @@ static void build_dashboard(void)
     s_hdr_status = make_label(scr, FONT_S, COL_DIM);
     lv_obj_set_pos(s_hdr_status, 300, 14);
 
-    /* Two buttons rather than one menu: with exactly two destinations, a menu
-     * is an extra tap and an extra thing to discover. */
     lv_obj_t *wifi = make_btn(scr, LV_SYMBOL_WIFI, reopen_setup_cb, NULL);
     lv_obj_set_size(wifi, 52, 30);
-    lv_obj_set_pos(wifi, SCR_W - 110 - GRID_MX, 4);
+    lv_obj_set_pos(wifi, SCR_W - 168 - GRID_MX, 4);
+
+    lv_obj_t *list = make_btn(scr, LV_SYMBOL_LIST, browse_cb, NULL);
+    lv_obj_set_size(list, 52, 30);
+    lv_obj_set_pos(list, SCR_W - 110 - GRID_MX, 4);
 
     lv_obj_t *gear = make_btn(scr, LV_SYMBOL_SETTINGS, endpoints_cb, NULL);
     lv_obj_set_size(gear, 52, 30);
@@ -207,13 +230,14 @@ static void build_dashboard(void)
     lv_obj_t *div = make_divider(scr, SCR_W);
     lv_obj_set_pos(div, 0, HEADER_H - 1);
 
-    /* Titles come from the poller's watch table, which is static and valid
-     * before the task starts -- the dashboard is built first. */
-    for (int i = 0; i < POLLER_MAX_WATCH; i++) {
-        s_specs[i] = k_tiles[i];
-        s_specs[i].title = poller_label(i);
-        s_tiles[i] = tile_create(scr, &s_specs[i]);
-    }
+    s_empty = make_label(scr, FONT_L, COL_DIM);
+    lv_label_set_text(s_empty,
+                      "No metrics selected\n\n"
+                      LV_SYMBOL_LIST "  Browse metrics to choose what to show");
+    lv_obj_set_style_text_align(s_empty, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 0);
+
+    build_tiles(scr);
 
     lv_obj_t *fdiv = make_divider(scr, SCR_W);
     lv_obj_set_pos(fdiv, 0, FOOTER_Y);
@@ -223,6 +247,23 @@ static void build_dashboard(void)
 
     s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
     lv_obj_set_pos(s_ftr_right, SCR_W - 330, FOOTER_Y + 7);
+}
+
+static void rebuild_dashboard(void)
+{
+    const config_t *c = config_get();
+    label_set_if_changed(s_hdr_title,
+                         (c->n_endpoints && c->endpoints[0].name[0])
+                         ? c->endpoints[0].name : "Prometheus Panel");
+}
+
+static void browser_closed(void)
+{
+    /* Selections changed: rebuild both sides of the mapping, in this order,
+     * so the poller's slot i still corresponds to tile i. */
+    poller_reload();
+    build_tiles(lv_scr_act());
+    s_seen_gen = UINT32_MAX;     /* force a repaint from the next snapshot */
 }
 
 /*
@@ -241,19 +282,25 @@ static void dashboard_tick(lv_timer_t *timer)
      */
     static int beat;
     if (beat++ % 20 == 0) {
-        ESP_LOGI(TAG, "ui alive: tiles=%s seen_gen=%u stack_hw=%u",
-                 s_tiles[0] ? "built" : "NULL", (unsigned)s_seen_gen,
+        ESP_LOGI(TAG, "ui alive: tiles=%d seen_gen=%u stack_hw=%u",
+                 s_tile_n, (unsigned)s_seen_gen,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
 
-    if (s_tiles[0] == NULL) return;
-
-    poller_snap_t snap;
+    /*
+     * Static, not a stack local, and taken ONCE.
+     *
+     * poller_snap_t carries every watch slot -- ~2.5KB at 24 panels -- and
+     * this used to declare two of them on a 6KB LVGL task stack, which
+     * overflowed the moment the watch limit was raised from 8. It only ever
+     * runs on the LVGL task, so a static is safe and free.
+     */
+    static poller_snap_t snap;
     poller_snapshot(&snap);
 
     if (snap.generation != s_seen_gen) {
         s_seen_gen = snap.generation;
-        for (int i = 0; i < snap.n && i < POLLER_MAX_WATCH; i++) {
+        for (int i = 0; i < snap.n && i < s_tile_n; i++) {
             const poller_metric_t *m = &snap.m[i];
             tile_data_t d = {
                 .valid        = m->valid,
@@ -282,15 +329,17 @@ static void dashboard_tick(lv_timer_t *timer)
                                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
 
-    poller_snap_t s2;
-    poller_snapshot(&s2);
-    if (s2.last_ok_ms > 0) {
-        int age = (int)((esp_timer_get_time() / 1000 - s2.last_ok_ms) / 1000);
-        label_set_fmt_if_changed(s_ftr_left, "updated %ds ago   %s", age, s2.status);
+    /* The age readout has to keep counting even when no new data arrived, so
+     * it is refreshed outside the generation check -- but from the same
+     * snapshot. */
+    if (snap.last_ok_ms > 0) {
+        int age = (int)((esp_timer_get_time() / 1000 - snap.last_ok_ms) / 1000);
+        label_set_fmt_if_changed(s_ftr_left, "updated %ds ago   %s",
+                                 age, snap.status);
     } else {
-        label_set_fmt_if_changed(s_ftr_left, "%s", s2.status);
+        label_set_fmt_if_changed(s_ftr_left, "%s", snap.status);
     }
-    text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
+    text_color_if_changed(s_ftr_left, snap.ok ? COL_DIM : COL_WARN);
 }
 
 /* -------------------------------------------------------------------- main */

@@ -52,6 +52,8 @@ typedef struct {
     fmt_mode_t  fmt;
     agg_mode_t  agg;
     char        unit[8];
+    float       q;                   /* quantile for histogram/summary panels,
+                                      * 0 => not a quantile panel */
     float       vmin, vmax;          /* NAN => auto */
     float       warn, crit;          /* NAN => no threshold */
     bool        lower_is_worse;
@@ -110,6 +112,15 @@ esp_err_t config_flush_sync(void);
 
 /* True when the last load fell back to defaults. */
 bool config_was_reset(void);
+
+cfg_panel_t *config_panel_add(void);
+void         config_panel_remove(uint16_t id);
+/* True if a selector is already on a screen -- the browser shows ticks. */
+bool         config_has_panel(uint16_t ep_id, const char *sel);
+
+/* Place a new panel in the first free cell of its screen, or return false if
+ * the screen is full. Spans come from the renderer's natural size. */
+bool config_place_panel(cfg_panel_t *p);
 
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id);
 cfg_endpoint_t *config_endpoint_add(void);

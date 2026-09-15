@@ -17,7 +17,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define POLLER_MAX_WATCH 8
+#include "config.h"
+
+#define POLLER_MAX_WATCH CFG_MAX_PANELS
 #define POLLER_NAME_MAX  40
 #define POLLER_TEXT_MAX  24
 
@@ -62,9 +64,12 @@ const char *poller_url(void);
  * snapshot rather than crashing -- the UI is built before the poller runs. */
 void poller_snapshot(poller_snap_t *out);
 
-/* The display label for a watch slot. Backed by a static table, so it is
- * valid at any time including before poller_start(). */
-const char *poller_label(int idx);
+/* Rebuild the watch list from the stored panels. Safe from the LVGL task:
+ * the scrape loop picks the new list up on its next cycle. */
+void poller_reload(void);
+
+/* The panel id backing a watch slot, so the UI can map a tile to its config. */
+uint16_t poller_panel_id(int idx);
 
 /* Cheap change check for the UI timer, no lock taken. */
 uint32_t poller_generation(void);

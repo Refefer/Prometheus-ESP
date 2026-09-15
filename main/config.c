@@ -1,5 +1,6 @@
 #include "config.h"
 #include "storage.h"
+#include "ui_layout.h"
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -136,6 +137,7 @@ static esp_err_t write_config(const char *path)
         write_escaped(f, p->unit);
         fprintf(f, ", \"kind\": %u, \"fmt\": %u, \"agg\": %u",
                 (unsigned)p->kind, (unsigned)p->fmt, (unsigned)p->agg);
+        fputs(", \"q\": ", f);    write_float(f, p->q);
         fputs(", \"vmin\": ", f); write_float(f, p->vmin);
         fputs(", \"vmax\": ", f); write_float(f, p->vmax);
         fputs(", \"warn\": ", f); write_float(f, p->warn);
@@ -317,6 +319,8 @@ static bool parse_into(const char *json, size_t len)
             p->kind = (tile_kind_t)get_int(it, "kind", TILE_STAT);
             p->fmt  = (fmt_mode_t)get_int(it, "fmt", FMT_AUTO);
             p->agg  = (agg_mode_t)get_int(it, "agg", AGG_LAST);
+            float q = get_float(it, "q");
+            p->q    = isnan(q) ? 0.0f : q;
             p->vmin = get_float(it, "vmin");
             p->vmax = get_float(it, "vmax");
             p->warn = get_float(it, "warn");
@@ -404,6 +408,78 @@ void config_mark_good_boot(void)
     /* Only after the UI is up and the config has proven loadable, so the
      * backup is a known-good-BOOT config and not merely the previous save. */
     if (write_config(PATH_BAK) == ESP_OK) ESP_LOGD(TAG, "backup refreshed");
+}
+
+cfg_panel_t *config_panel_add(void)
+{
+    if (s_cfg.n_panels >= CFG_MAX_PANELS) return NULL;
+    cfg_panel_t *p = &s_cfg.panels[s_cfg.n_panels++];
+    memset(p, 0, sizeof(*p));
+    p->id   = s_cfg.next_id++;
+    p->kind = TILE_STAT;
+    p->fmt  = FMT_AUTO;
+    p->agg  = AGG_LAST;
+    p->vmin = p->vmax = p->warn = p->crit = NAN;
+    p->w = p->h = 1;
+    return p;
+}
+
+void config_panel_remove(uint16_t id)
+{
+    for (int i = 0; i < s_cfg.n_panels; i++) {
+        if (s_cfg.panels[i].id != id) continue;
+        for (int j = i; j + 1 < s_cfg.n_panels; j++) {
+            s_cfg.panels[j] = s_cfg.panels[j + 1];
+        }
+        s_cfg.n_panels--;
+        config_touch();
+        return;
+    }
+}
+
+bool config_has_panel(uint16_t ep_id, const char *sel)
+{
+    for (int i = 0; i < s_cfg.n_panels; i++) {
+        if (s_cfg.panels[i].ep_id == ep_id &&
+            strcmp(s_cfg.panels[i].sel, sel) == 0) return true;
+    }
+    return false;
+}
+
+/*
+ * First-fit into a 4x3 occupancy bitmap for the panel's screen.
+ *
+ * Deliberately first-fit and row-major rather than anything cleverer: the
+ * user can move tiles afterwards, and an auto-layout that reshuffles existing
+ * tiles when a new one arrives is infuriating. Only free cells are used.
+ */
+bool config_place_panel(cfg_panel_t *p)
+{
+    bool used[GRID_ROWS][GRID_COLS];
+    memset(used, 0, sizeof(used));
+
+    for (int i = 0; i < s_cfg.n_panels; i++) {
+        const cfg_panel_t *o = &s_cfg.panels[i];
+        if (o == p || o->screen != p->screen) continue;
+        for (int r = o->row; r < o->row + o->h && r < GRID_ROWS; r++) {
+            for (int c = o->col; c < o->col + o->w && c < GRID_COLS; c++) {
+                used[r][c] = true;
+            }
+        }
+    }
+
+    for (int r = 0; r + p->h <= GRID_ROWS; r++) {
+        for (int c = 0; c + p->w <= GRID_COLS; c++) {
+            bool fits = true;
+            for (int rr = r; rr < r + p->h && fits; rr++) {
+                for (int cc = c; cc < c + p->w; cc++) {
+                    if (used[rr][cc]) { fits = false; break; }
+                }
+            }
+            if (fits) { p->row = (uint8_t)r; p->col = (uint8_t)c; return true; }
+        }
+    }
+    return false;
 }
 
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id)
