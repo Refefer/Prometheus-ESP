@@ -27,6 +27,7 @@
 #include "ui_kbd.h"
 #include "ui_layout.h"
 #include "ui_browser.h"
+#include "ui_panelcfg.h"
 #include "ui_endpoints.h"
 #include "ui_setup.h"
 #include "ui_theme.h"
@@ -176,6 +177,7 @@ static void build_tiles(lv_obj_t *scr)
 
         tile_spec_t *sp = &s_specs[s_tile_n];
         memset(sp, 0, sizeof(*sp));
+        sp->panel_id = p->id;
         sp->title = p->title[0] ? p->title : p->sel;
         sp->kind  = p->kind;
         sp->col   = p->col;  sp->row = p->row;
@@ -193,6 +195,13 @@ static void build_tiles(lv_obj_t *scr)
 }
 
 static void browser_closed(void);
+
+/* A tap on a tile opens its settings; closing them rebuilds, since the widget
+ * type or span may have changed. */
+static void tile_tapped(uint16_t panel_id)
+{
+    ui_panelcfg_open(panel_id, browser_closed);
+}
 
 static void browse_cb(lv_event_t *e)
 {
@@ -237,6 +246,7 @@ static void build_dashboard(void)
     lv_obj_set_style_text_align(s_empty, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 0);
 
+    tile_set_tap_handler(tile_tapped);
     build_tiles(scr);
 
     lv_obj_t *fdiv = make_divider(scr, SCR_W);
@@ -319,6 +329,12 @@ static void dashboard_tick(lv_timer_t *timer)
                 .p99          = m->p99,
                 .fmt          = (fmt_mode_t)m->fmt,
                 .unit         = m->unit,
+                .n_children   = m->n_children,
+                .n_matched    = m->n_matched,
+                .child_label  = m->child_label,
+                .child_value  = m->child_value,
+                .child_num    = m->child_num,
+                .child_order  = m->child_order,
             };
             tile_update(s_tiles[i], &d);
         }

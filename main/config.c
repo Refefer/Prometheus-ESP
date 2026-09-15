@@ -142,6 +142,7 @@ static esp_err_t write_config(const char *path)
         fputs(", \"vmax\": ", f); write_float(f, p->vmax);
         fputs(", \"warn\": ", f); write_float(f, p->warn);
         fputs(", \"crit\": ", f); write_float(f, p->crit);
+        fprintf(f, ", \"multi\": %s", p->multi ? "true" : "false");
         fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
                    " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
                 p->lower_is_worse ? "true" : "false",
@@ -325,6 +326,7 @@ static bool parse_into(const char *json, size_t len)
             p->vmax = get_float(it, "vmax");
             p->warn = get_float(it, "warn");
             p->crit = get_float(it, "crit");
+            p->multi          = get_bool(it, "multi", false);
             p->lower_is_worse = get_bool(it, "lower_is_worse", false);
             p->screen = (uint8_t)get_int(it, "screen", 0);
             p->col = (uint8_t)get_int(it, "col", 0);

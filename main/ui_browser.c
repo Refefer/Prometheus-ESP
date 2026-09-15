@@ -423,7 +423,11 @@ static void selected_cb(lv_event_t *e)
     lv_obj_t *btn = lv_event_get_target(e);
     s_selected_only = !s_selected_only;
     lv_obj_t *l = lv_obj_get_child(btn, 0);
-    if (l) label_set_if_changed(l, s_selected_only ? "selected" : "all");
+    if (l) label_set_if_changed(l, s_selected_only ? "Show: selected"
+                                                   : "Show: all");
+    /* Tinted while filtering, so it is obvious the list is not everything. */
+    bg_color_if_changed(btn, s_selected_only ? COL_ACCENT : COL_PANEL);
+    if (l) text_color_if_changed(l, s_selected_only ? COL_BG : COL_TEXT);
     s_page = 0;
     refilter();
     render_rows();
@@ -514,8 +518,11 @@ void ui_browser_open(void (*on_close)(void))
     lv_obj_set_size(s_search_btn, 330, 40);
     lv_obj_set_pos(s_search_btn, GRID_MX, 46);
 
-    lv_obj_t *selbtn = make_btn(s_root, "all", selected_cb, NULL);
-    lv_obj_set_size(selbtn, 130, 40);
+    /* Named for what it does, not for its state: "all"/"selected" alone reads
+     * as a label rather than a control, and this is the button you want when
+     * removing tiles. */
+    lv_obj_t *selbtn = make_btn(s_root, "Show: all", selected_cb, NULL);
+    lv_obj_set_size(selbtn, 190, 40);
     lv_obj_set_pos(selbtn, GRID_MX + 340, 46);
 
     lv_obj_t *rescan = make_btn(s_root, LV_SYMBOL_REFRESH "  Rescan",

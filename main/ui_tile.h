@@ -24,11 +24,13 @@ typedef enum {
     TILE_GAUGE,      /* arc against a range */
     TILE_STATUS,     /* up/down */
     TILE_HIST,       /* bucket distribution + tail quantiles */
+    TILE_MULTI,      /* one metric across several label sets */
     TILE_KIND_COUNT,
 } tile_kind_t;
 
 /* What a tile shows and where. */
 typedef struct {
+    uint16_t    panel_id;     /* so a tap can open the right settings */
     const char *title;
     tile_kind_t kind;
     uint8_t     col, row, w, h;   /* grid position and span */
@@ -55,6 +57,14 @@ typedef struct {
     float        p50, p90, p99;
     fmt_mode_t   fmt;         /* how to render the quantiles */
     const char  *unit;
+
+    /* Multi-series extras. */
+    uint8_t        n_children;
+    uint8_t        n_matched;     /* may exceed n_children; the tile says "+N" */
+    const char   (*child_label)[20];
+    const float   *child_value;
+    const char   (*child_num)[16];
+    const uint8_t *child_order;
 } tile_data_t;
 
 typedef struct tile_inst tile_inst_t;
@@ -85,6 +95,9 @@ struct tile_inst {
 };
 
 const tile_vt_t *tile_vt(tile_kind_t k);
+
+/* Called when a tile is tapped. Set once at startup. */
+void tile_set_tap_handler(void (*cb)(uint16_t panel_id));
 
 /* Build a tile into `parent` at its spec's grid position. */
 tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec);

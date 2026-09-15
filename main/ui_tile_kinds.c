@@ -6,6 +6,7 @@
  *  - no renderer does arithmetic on the metric. Values arrive formatted.
  */
 #include "ui_layout.h"
+#include "poller.h"
 #include "ui_tile.h"
 #include "ui_widgets.h"
 
@@ -628,4 +629,134 @@ const tile_vt_t tile_hist_vt = {
     /* Needs a 2x2: three quantile rows plus bars will not fit in 128px, and
      * the fallback to a plain p99 number is the honest degradation. */
     "Histogram", 2, 2, TILE_STAT, hist_build, hist_update, hist_destroy,
+};
+
+/* ------------------------------------------------------------ TILE_MULTI */
+
+/*
+ * One metric across several label sets, as ranked bars.
+ *
+ * Deliberately bars and not small multiples: per-CPU or per-mode is
+ * fundamentally a COMPARISON, and sorted bars answer "which one is hot"
+ * instantly from across a room, where eight tiny sparklines answer nothing at
+ * that distance.
+ *
+ * Row order is held steady for about a minute by the poller. Re-ranking every
+ * poll makes rows leapfrog continuously and you cannot follow one long enough
+ * to read it.
+ */
+#define MULTI_ROW_H 22
+
+typedef struct {
+    lv_obj_t *name[POLLER_ROWS_MAX];
+    lv_obj_t *val[POLLER_ROWS_MAX];
+    lv_obj_t *bar[POLLER_ROWS_MAX];
+    lv_obj_t *more;
+    int       rows;
+} multi_priv_t;
+
+static void multi_build(tile_inst_t *t, lv_obj_t *body)
+{
+    multi_priv_t *p = lv_mem_alloc(sizeof(*p));
+    memset(p, 0, sizeof(*p));
+    t->priv = p;
+
+    lv_coord_t w = TILE_W(t->spec->w) - 2 * PAD_S;
+    lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
+
+    p->rows = (h - 14) / MULTI_ROW_H;
+    if (p->rows > POLLER_ROWS_MAX) p->rows = POLLER_ROWS_MAX;
+    if (p->rows < 1) p->rows = 1;
+
+    lv_coord_t name_w = w < 260 ? 74 : 110;
+    lv_coord_t val_w  = w < 260 ? 54 : 70;
+    lv_coord_t bar_x  = name_w + val_w + 8;
+    lv_coord_t bar_w  = w - bar_x;
+    if (bar_w < 20) bar_w = 20;
+
+    for (int r = 0; r < p->rows; r++) {
+        lv_coord_t y = r * MULTI_ROW_H;
+
+        p->name[r] = make_label(body, FONT_S, COL_DIM);
+        lv_label_set_long_mode(p->name[r], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(p->name[r], name_w);
+        lv_obj_set_pos(p->name[r], 0, y + 2);
+
+        p->val[r] = make_label(body, FONT_S, COL_TEXT);
+        lv_obj_set_style_text_align(p->val[r], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(p->val[r], val_w);
+        lv_obj_set_pos(p->val[r], name_w, y + 2);
+
+        p->bar[r] = lv_bar_create(body);
+        lv_obj_set_size(p->bar[r], bar_w, 8);
+        lv_obj_set_pos(p->bar[r], bar_x, y + 7);
+        lv_bar_set_range(p->bar[r], 0, CHART_SPAN);
+        lv_obj_set_style_bg_color(p->bar[r], COL_PANEL_ALT, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(p->bar[r], COL_ACCENT, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(p->bar[r], 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(p->bar[r], 2, LV_PART_INDICATOR);
+    }
+
+    p->more = make_label(body, FONT_XS, COL_DIM);
+    lv_obj_set_pos(p->more, 0, p->rows * MULTI_ROW_H + 1);
+}
+
+static void multi_update(tile_inst_t *t, const tile_data_t *d)
+{
+    multi_priv_t *p = t->priv;
+
+    if (!d->valid || d->n_children == 0) {
+        for (int r = 0; r < p->rows; r++) {
+            hidden_if_changed(p->name[r], true);
+            hidden_if_changed(p->val[r], true);
+            hidden_if_changed(p->bar[r], true);
+        }
+        label_set_if_changed(p->more, d->warming ? "warming up" : "no data");
+        return;
+    }
+
+    /* Scale to the largest child, so the comparison fills the tile whatever
+     * the absolute magnitudes happen to be. */
+    float peak = 0;
+    for (int i = 0; i < d->n_children; i++) {
+        if (d->child_value[i] > peak) peak = d->child_value[i];
+    }
+    if (peak <= 0) peak = 1.0f;
+
+    for (int r = 0; r < p->rows; r++) {
+        if (r >= d->n_children) {
+            hidden_if_changed(p->name[r], true);
+            hidden_if_changed(p->val[r], true);
+            hidden_if_changed(p->bar[r], true);
+            continue;
+        }
+        hidden_if_changed(p->name[r], false);
+        hidden_if_changed(p->val[r], false);
+        hidden_if_changed(p->bar[r], false);
+
+        int i = d->child_order ? d->child_order[r] : r;
+        if (i >= d->n_children) i = r;
+
+        label_set_if_changed(p->name[r], d->child_label[i]);
+        label_set_if_changed(p->val[r], d->child_num[i]);
+
+        int32_t want = (int32_t)((d->child_value[i] / peak) * CHART_SPAN);
+        if (lv_bar_get_value(p->bar[r]) != want) {
+            lv_bar_set_value(p->bar[r], want, LV_ANIM_OFF);
+        }
+    }
+
+    if (d->n_matched > d->n_children) {
+        label_set_fmt_if_changed(p->more, "+%u more",
+                                 (unsigned)(d->n_matched - d->n_children));
+    } else {
+        label_set_if_changed(p->more, "");
+    }
+}
+
+static void multi_destroy(tile_inst_t *t) { lv_mem_free(t->priv); t->priv = NULL; }
+
+const tile_vt_t tile_multi_vt = {
+    /* Needs the width for name + value + bar on one row. */
+    "Multi-series", 2, 1, TILE_STAT, multi_build, multi_update, multi_destroy,
 };

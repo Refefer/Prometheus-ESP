@@ -40,8 +40,18 @@ typedef struct {
     float        q;              /* >0 => derive this quantile from buckets */
     bool         active;
 
+    bool         multi;
+
     rate_state_t rate;
     fmt_state_t  fmt_state;
+
+    /* Per-child state for a multi-series watch, keyed by the child's label so
+     * a baseline survives series appearing and disappearing between scrapes. */
+    char         child_key[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
+    rate_state_t child_rate[POLLER_MAX_CHILDREN];
+    uint8_t      n_child;
+    uint8_t      order[POLLER_MAX_CHILDREN];  /* display order, held steady */
+    uint8_t      resort_in;                   /* publishes until a re-rank */
 } watch_rt_t;
 
 /* Per-scrape accumulation. */
@@ -51,6 +61,11 @@ typedef struct {
     int    nb;
     double le[PROM_MAX_BUCKETS];
     double cum[PROM_MAX_BUCKETS];
+
+    uint8_t n_child;
+    uint8_t n_matched;
+    char    child_label[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
+    double  child_value[POLLER_MAX_CHILDREN];
 } watch_scratch_t;
 
 static watch_rt_t      s_watch[POLLER_MAX_WATCH];
@@ -101,6 +116,35 @@ static bool labels_match(const prom_sample_t *s, const watch_rt_t *w)
         if (!found) return false;
     }
     return true;
+}
+
+/*
+ * Name a child by the labels that actually distinguish it -- the ones the
+ * watch's filter does not already pin. For node_cpu_seconds_total filtered to
+ * nothing that yields "0 idle"; filtered to cpu="0" it yields just "idle",
+ * which is what the reader needs and all a 185px row can hold.
+ */
+static void child_label_of(const prom_sample_t *s, const watch_rt_t *w,
+                           char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = '\0';
+    for (uint8_t i = 0; i < s->n_labels && o + 1 < cap; i++) {
+        bool pinned = false;
+        for (uint8_t j = 0; j < w->n_labels; j++) {
+            if (s->labels[i].key_len == w->labels[j].key_len &&
+                memcmp(s->labels[i].key, w->labels[j].key,
+                       w->labels[i].key_len) == 0) { pinned = true; break; }
+        }
+        if (pinned) continue;
+        if (o > 0 && o + 1 < cap) out[o++] = ' ';
+        size_t n = s->labels[i].val_len;
+        if (o + n >= cap) n = cap - o - 1;
+        memcpy(out + o, s->labels[i].val, n);
+        o += n;
+    }
+    out[o] = '\0';
+    if (out[0] == '\0') strncpy(out, "value", cap - 1);
 }
 
 static bool name_is(const prom_sample_t *s, const char *want, uint16_t len)
@@ -155,6 +199,28 @@ static bool on_sample(void *ctx, const prom_sample_t *s)
         }
 
         if (!name_is(s, w->name, w->name_len) || !labels_match(s, w)) continue;
+
+        if (w->multi) {
+            watch_scratch_t *sc = &s_scratch[i];
+            if (!prom_is_num(s->value)) continue;
+            char key[POLLER_CHILD_LABEL];
+            child_label_of(s, w, key, sizeof(key));
+
+            int slot = -1;
+            for (int k = 0; k < sc->n_child; k++) {
+                if (strcmp(sc->child_label[k], key) == 0) { slot = k; break; }
+            }
+            if (slot < 0) {
+                sc->n_matched++;
+                if (sc->n_child >= POLLER_MAX_CHILDREN) continue;
+                slot = sc->n_child++;
+                strncpy(sc->child_label[slot], key, POLLER_CHILD_LABEL - 1);
+            }
+            sc->child_value[slot] = s->value.num;
+            sc->seen = true;
+            continue;
+        }
+
         s_scratch[i].value = s->value;
         s_scratch[i].seen  = true;
     }
@@ -205,7 +271,82 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
         double shown = NAN;
 
-        if (w->q > 0.0f) {
+        if (w->multi) {
+            /* Per-child baselines are keyed by label so a series appearing or
+             * disappearing between scrapes does not shift everyone else's
+             * rate onto the wrong history. */
+            for (int k = 0; k < sc->n_child; k++) {
+                int slot = -1;
+                for (int j = 0; j < w->n_child; j++) {
+                    if (strcmp(w->child_key[j], sc->child_label[k]) == 0) {
+                        slot = j; break;
+                    }
+                }
+                if (slot < 0 && w->n_child < POLLER_MAX_CHILDREN) {
+                    slot = w->n_child++;
+                    strncpy(w->child_key[slot], sc->child_label[k],
+                            POLLER_CHILD_LABEL - 1);
+                }
+
+                double cv = NAN;
+                if (w->agg == AGG_RATE && slot >= 0) {
+                    float r = 0;
+                    rate_status_t rc = prom_rate_step(&w->child_rate[slot],
+                                                      prom_num(sc->child_value[k]),
+                                                      t, (int64_t)s_interval_s * 3000,
+                                                      &r);
+                    if (rc == RATE_OK) cv = r;
+                } else {
+                    cv = sc->child_value[k];
+                }
+
+                strncpy(m->child_label[k], sc->child_label[k],
+                        POLLER_CHILD_LABEL - 1);
+                m->child_value[k] = isfinite(cv) ? (float)cv : 0.0f;
+                if (isfinite(cv)) {
+                    fmt_state_t fs = {0};
+                    char suf[12];
+                    bool numeric;
+                    ui_fmt_value(cv, w->fmt, w->unit, &fs,
+                                 m->child_num[k], sizeof(m->child_num[k]),
+                                 suf, sizeof(suf), &numeric);
+                } else {
+                    strncpy(m->child_num[k], "--", sizeof(m->child_num[k]) - 1);
+                }
+            }
+            m->n_children = sc->n_child;
+            m->n_matched  = sc->n_matched ? sc->n_matched : sc->n_child;
+
+            /*
+             * Rank by value, but hold the order for about a minute.
+             * Re-sorting every poll makes rows leapfrog continuously, which is
+             * unreadable -- you cannot follow a row long enough to read it.
+             */
+            if (w->resort_in == 0) {
+                for (int a = 1; a < m->n_children; a++) {
+                    uint8_t keyi = (uint8_t)a;
+                    int b = a - 1;
+                    while (b >= 0 &&
+                           m->child_value[w->order[b]] < m->child_value[keyi]) {
+                        w->order[b + 1] = w->order[b];
+                        b--;
+                    }
+                    w->order[b + 1] = keyi;
+                }
+                w->resort_in = 12;
+            } else {
+                w->resort_in--;
+            }
+            for (int a = 0; a < m->n_children; a++) {
+                if (w->order[a] >= m->n_children) w->order[a] = (uint8_t)a;
+                m->child_order[a] = w->order[a];
+            }
+
+            /* The tile's headline value is the total across the children. */
+            double sum = 0;
+            for (int k = 0; k < m->n_children; k++) sum += m->child_value[k];
+            shown = sum;
+        } else if (w->q > 0.0f) {
             if (sc->nb >= 2) {
                 /* Sort by bound with +Inf last, then clamp: a scrape racing a
                  * concurrent observation can return non-monotonic counts, and
@@ -544,6 +685,7 @@ void poller_reload(void)
         w->agg      = p->agg;
         w->fmt      = p->fmt;
         w->q        = p->q;
+        w->multi    = p->multi;
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
         strncpy(w->scratch, p->sel, sizeof(w->scratch) - 1);
 

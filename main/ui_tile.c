@@ -16,7 +16,7 @@ static const char *TAG = "tile";
 
 extern const tile_vt_t tile_stat_vt, tile_spark_vt, tile_chart_vt,
                        tile_bar_vt, tile_gauge_vt, tile_status_vt,
-                       tile_hist_vt;
+                       tile_hist_vt, tile_multi_vt;
 
 static const tile_vt_t *const k_vt[TILE_KIND_COUNT] = {
     [TILE_STAT]   = &tile_stat_vt,
@@ -26,7 +26,21 @@ static const tile_vt_t *const k_vt[TILE_KIND_COUNT] = {
     [TILE_GAUGE]  = &tile_gauge_vt,
     [TILE_STATUS] = &tile_status_vt,
     [TILE_HIST]   = &tile_hist_vt,
+    [TILE_MULTI]  = &tile_multi_vt,
 };
+
+static void (*s_tap_cb)(uint16_t);
+
+void tile_set_tap_handler(void (*cb)(uint16_t panel_id))
+{
+    s_tap_cb = cb;
+}
+
+static void shell_clicked(lv_event_t *e)
+{
+    tile_inst_t *t = lv_event_get_user_data(e);
+    if (s_tap_cb && t && t->spec) s_tap_cb(t->spec->panel_id);
+}
 
 const tile_vt_t *tile_vt(tile_kind_t k)
 {
@@ -75,6 +89,8 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
     t->shell = make_card(parent);
     lv_obj_set_size(t->shell, TILE_W(spec->w), TILE_H(spec->h));
     lv_obj_set_pos(t->shell, TILE_X(spec->col), TILE_Y(spec->row));
+    lv_obj_add_flag(t->shell, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(t->shell, shell_clicked, LV_EVENT_CLICKED, t);
     /* Gestures bubble up from tiles to the page so a swipe that starts on a
      * tile still pages; only the page clears GESTURE_BUBBLE. */
 

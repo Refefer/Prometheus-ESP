@@ -21,7 +21,10 @@
 
 #define CFG_SCHEMA_VERSION   1
 #define CFG_MAX_ENDPOINTS    8
-#define CFG_MAX_PANELS      24
+/* A screen holds twelve 1x1 cells, so it cannot show more than twelve panels.
+ * Keeping the cap at the real limit matters: poller_snap_t carries every slot
+ * and three static copies of it live in internal SRAM. */
+#define CFG_MAX_PANELS      12
 #define CFG_MAX_SCREENS      6
 #define CFG_URL_MAX        192
 #define CFG_NAME_MAX        24
@@ -59,6 +62,9 @@ typedef struct {
     bool        lower_is_worse;
     uint8_t     screen;              /* index into screens[] */
     uint8_t     col, row, w, h;
+    /* A multi-series panel matches every series of its metric rather than one,
+     * so its selector carries only the labels that narrow the set. */
+    bool        multi;
 } cfg_panel_t;
 
 typedef struct {

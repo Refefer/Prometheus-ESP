@@ -25,6 +25,11 @@
  * to this many -- past about a dozen bars a 380px tile cannot render them
  * distinguishably anyway. */
 #define POLLER_MAX_BUCKETS 16
+/* Rows a multi-series tile can show. Past about six, a 185px-wide tile is
+ * illegible and the reader wants the detail view instead. */
+#define POLLER_MAX_CHILDREN 6
+#define POLLER_ROWS_MAX     POLLER_MAX_CHILDREN
+#define POLLER_CHILD_LABEL  20
 #define POLLER_TEXT_MAX  24
 
 typedef struct {
@@ -46,6 +51,14 @@ typedef struct {
     float   p50, p90, p99;
     uint8_t fmt;                     /* fmt_mode_t, for rendering quantiles */
     char    unit[8];
+
+    /* Multi-series extras: one row per matching series, ranked by value. */
+    uint8_t n_children;
+    uint8_t n_matched;               /* total matches, may exceed n_children */
+    char    child_label[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
+    float   child_value[POLLER_MAX_CHILDREN];
+    char    child_num[POLLER_MAX_CHILDREN][16];
+    uint8_t child_order[POLLER_MAX_CHILDREN];
     bool   warming;                  /* counter with no baseline yet */
     bool   restarted;                /* counter reset seen on this scrape */
 } poller_metric_t;
