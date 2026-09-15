@@ -21,6 +21,10 @@
 
 #define POLLER_MAX_WATCH CFG_MAX_PANELS
 #define POLLER_NAME_MAX  40
+/* Buckets carried to the UI for display. A histogram with more is merged down
+ * to this many -- past about a dozen bars a 380px tile cannot render them
+ * distinguishably anyway. */
+#define POLLER_MAX_BUCKETS 16
 #define POLLER_TEXT_MAX  24
 
 typedef struct {
@@ -32,6 +36,16 @@ typedef struct {
                                       * not a string */
     bool   numeric_only;             /* num[] is safe for the digit faces */
     bool   valid;                    /* false while warming up or absent */
+
+    /* Histogram/summary extras, valid when has_hist. The UI does no maths on
+     * these: shares are already normalised and quantiles already derived. */
+    bool    has_hist;
+    uint8_t n_buckets;
+    float   bucket_le[POLLER_MAX_BUCKETS];    /* upper bound; INFINITY last */
+    float   bucket_share[POLLER_MAX_BUCKETS]; /* non-cumulative, 0..1 */
+    float   p50, p90, p99;
+    uint8_t fmt;                     /* fmt_mode_t, for rendering quantiles */
+    char    unit[8];
     bool   warming;                  /* counter with no baseline yet */
     bool   restarted;                /* counter reset seen on this scrape */
 } poller_metric_t;

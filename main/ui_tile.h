@@ -23,6 +23,7 @@ typedef enum {
     TILE_BAR,        /* value against a range */
     TILE_GAUGE,      /* arc against a range */
     TILE_STATUS,     /* up/down */
+    TILE_HIST,       /* bucket distribution + tail quantiles */
     TILE_KIND_COUNT,
 } tile_kind_t;
 
@@ -45,6 +46,15 @@ typedef struct {
     const char *num;          /* formatted, digits-only when numeric_only */
     const char *suffix;
     bool        numeric_only; /* safe for the large digit faces */
+
+    /* Histogram extras; has_hist is false for every other metric kind. */
+    bool         has_hist;
+    uint8_t      n_buckets;
+    const float *bucket_le;
+    const float *bucket_share;
+    float        p50, p90, p99;
+    fmt_mode_t   fmt;         /* how to render the quantiles */
+    const char  *unit;
 } tile_data_t;
 
 typedef struct tile_inst tile_inst_t;

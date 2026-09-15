@@ -15,7 +15,8 @@
 static const char *TAG = "tile";
 
 extern const tile_vt_t tile_stat_vt, tile_spark_vt, tile_chart_vt,
-                       tile_bar_vt, tile_gauge_vt, tile_status_vt;
+                       tile_bar_vt, tile_gauge_vt, tile_status_vt,
+                       tile_hist_vt;
 
 static const tile_vt_t *const k_vt[TILE_KIND_COUNT] = {
     [TILE_STAT]   = &tile_stat_vt,
@@ -24,6 +25,7 @@ static const tile_vt_t *const k_vt[TILE_KIND_COUNT] = {
     [TILE_BAR]    = &tile_bar_vt,
     [TILE_GAUGE]  = &tile_gauge_vt,
     [TILE_STATUS] = &tile_status_vt,
+    [TILE_HIST]   = &tile_hist_vt,
 };
 
 const tile_vt_t *tile_vt(tile_kind_t k)

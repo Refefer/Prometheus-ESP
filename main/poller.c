@@ -177,6 +177,8 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         watch_scratch_t *sc = &s_scratch[i];
         poller_metric_t *m  = &next.m[i];
         strncpy(m->label, w->label, sizeof(m->label) - 1);
+        strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
+        m->fmt = (uint8_t)w->fmt;
 
         if (!ok || !sc->seen) {
             m->valid = false;
@@ -202,6 +204,32 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 }
                 prom_hist_repair(sc->cum, sc->nb);
                 shown = prom_hist_quantile((double)w->q, sc->le, sc->cum, sc->nb);
+
+                /* Also hand the distribution up, so a histogram can be shown
+                 * as one rather than reduced to a single number. */
+                m->p50 = (float)prom_hist_quantile(0.50, sc->le, sc->cum, sc->nb);
+                m->p90 = (float)prom_hist_quantile(0.90, sc->le, sc->cum, sc->nb);
+                m->p99 = (float)prom_hist_quantile(0.99, sc->le, sc->cum, sc->nb);
+
+                double total = sc->cum[sc->nb - 1];
+                if (total > 0) {
+                    /* Merge down to what a tile can actually draw: keep the
+                     * first N-1 bounds and lump everything above into the
+                     * last bar, which keeps the shares summing to 1. */
+                    int keep = sc->nb < POLLER_MAX_BUCKETS ? sc->nb
+                                                           : POLLER_MAX_BUCKETS;
+                    double prev = 0;
+                    for (int b = 0; b < keep; b++) {
+                        bool last = (b == keep - 1);
+                        double cum = last ? total : sc->cum[b];
+                        m->bucket_le[b]    = last ? (float)INFINITY
+                                                  : (float)sc->le[b];
+                        m->bucket_share[b] = (float)((cum - prev) / total);
+                        prev = cum;
+                    }
+                    m->n_buckets = (uint8_t)keep;
+                    m->has_hist  = true;
+                }
             }
         } else switch (w->agg) {
         case AGG_LAST:
@@ -488,6 +516,10 @@ void poller_reload(void)
     for (int i = 0; i < c->n_panels && s_watch_n < POLLER_MAX_WATCH; i++) {
         const cfg_panel_t *p = &c->panels[i];
         if (p->sel[0] == '\0') continue;
+        /* Must use the SAME predicate as the dashboard's tile builder: slot i
+         * here is tile i there, and a mismatch silently pairs a tile with
+         * another metric's numbers. */
+        if (p->screen != 0) continue;
 
         watch_rt_t *w = &s_watch[s_watch_n];
         w->panel_id = p->id;

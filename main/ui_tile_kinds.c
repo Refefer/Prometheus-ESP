@@ -501,3 +501,131 @@ static void status_destroy(tile_inst_t *t) { lv_mem_free(t->priv); t->priv = NUL
 const tile_vt_t tile_status_vt = {
     "Status", 1, 1, TILE_STAT, status_build, status_update, status_destroy,
 };
+
+/* ------------------------------------------------------------- TILE_HIST */
+
+/*
+ * A histogram shown as a histogram.
+ *
+ * Reducing one to a single p99 throws away the shape, which is usually the
+ * interesting part -- a bimodal latency distribution and a smooth one can
+ * share a p99 and mean completely different things. Bars are the
+ * NON-cumulative share per bucket; the exposition format gives cumulative
+ * counts, and drawing those is a monotonic ramp that tells you nothing.
+ */
+typedef struct {
+    lv_obj_t *chart;
+    lv_chart_series_t *ser;
+    lv_obj_t *lo_lbl, *hi_lbl;
+    lv_obj_t *q_lbl[3];
+    lv_obj_t *q_val[3];
+} hist_priv_t;
+
+static void hist_build(tile_inst_t *t, lv_obj_t *body)
+{
+    hist_priv_t *p = lv_mem_alloc(sizeof(*p));
+    memset(p, 0, sizeof(*p));
+    t->priv = p;
+
+    lv_coord_t w = TILE_W(t->spec->w) - 2 * PAD_S;
+    lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
+
+    /* Quantile rows take a fixed strip at the bottom; the bars get the rest. */
+    const lv_coord_t QROW = 20;
+    lv_coord_t qh = 3 * QROW;
+    lv_coord_t ch = h - qh - 14;
+    if (ch < 30) ch = 30;
+
+    p->chart = lv_chart_create(body);
+    lv_chart_set_type(p->chart, LV_CHART_TYPE_BAR);
+    lv_chart_set_div_line_count(p->chart, 0, 0);
+    lv_chart_set_range(p->chart, LV_CHART_AXIS_PRIMARY_Y, 0, CHART_SPAN);
+    lv_obj_set_size(p->chart, w, ch);
+    lv_obj_set_pos(p->chart, 0, 0);
+    lv_obj_set_style_bg_opa(p->chart, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->chart, 0, 0);
+    lv_obj_set_style_pad_all(p->chart, 0, 0);
+    lv_obj_set_style_pad_column(p->chart, 2, LV_PART_ITEMS);
+    lv_obj_clear_flag(p->chart, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(p->chart, LV_OBJ_FLAG_CLICKABLE);
+    p->ser = lv_chart_add_series(p->chart, COL_ACCENT, LV_CHART_AXIS_PRIMARY_Y);
+
+    /* The bounds of the range the bars span, so the shape has a scale. */
+    p->lo_lbl = make_label(body, FONT_XS, COL_DIM);
+    lv_obj_set_pos(p->lo_lbl, 0, ch + 1);
+    p->hi_lbl = make_label(body, FONT_XS, COL_DIM);
+    lv_obj_set_style_text_align(p->hi_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_width(p->hi_lbl, w / 2);
+    lv_obj_set_pos(p->hi_lbl, w - w / 2, ch + 1);
+
+    static const char *const names[3] = { "p50", "p90", "p99" };
+    for (int i = 0; i < 3; i++) {
+        p->q_lbl[i] = make_label(body, FONT_XS, COL_DIM);
+        lv_label_set_text(p->q_lbl[i], names[i]);
+        lv_obj_set_pos(p->q_lbl[i], 0, ch + 14 + i * QROW);
+
+        p->q_val[i] = make_label(body, FONT_S, COL_TEXT);
+        lv_obj_set_pos(p->q_val[i], 40, ch + 14 + i * QROW);
+    }
+}
+
+static void hist_update(tile_inst_t *t, const tile_data_t *d)
+{
+    hist_priv_t *p = t->priv;
+
+    if (!d->valid || !d->has_hist || d->n_buckets == 0) {
+        for (int i = 0; i < 3; i++) label_set_if_changed(p->q_val[i], "--");
+        label_set_if_changed(p->lo_lbl, "");
+        label_set_if_changed(p->hi_lbl, d->warming ? "warming up" : "no data");
+        return;
+    }
+
+    /* Scale to the tallest bar rather than to 1.0: most buckets in a real
+     * latency histogram hold a few percent, and a fixed 0..1 scale renders
+     * them as invisible slivers. */
+    float peak = 0;
+    for (int i = 0; i < d->n_buckets; i++) {
+        if (d->bucket_share[i] > peak) peak = d->bucket_share[i];
+    }
+    if (peak <= 0) peak = 1.0f;
+
+    lv_chart_set_point_count(p->chart, d->n_buckets);
+    for (int i = 0; i < d->n_buckets; i++) {
+        lv_coord_t v = (lv_coord_t)((d->bucket_share[i] / peak) * CHART_SPAN);
+        lv_chart_set_value_by_id(p->chart, p->ser, (uint16_t)i, v);
+    }
+    lv_chart_refresh(p->chart);
+
+    char buf[32];
+    ui_fmt_join(0.0, d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+    label_set_if_changed(p->lo_lbl, buf);
+
+    /* The last bound is +Inf by construction, so label the highest finite
+     * one -- "+Inf" as an axis label tells the reader nothing. */
+    float hi = 0;
+    for (int i = 0; i < d->n_buckets; i++) {
+        if (isfinite(d->bucket_le[i])) hi = d->bucket_le[i];
+    }
+    ui_fmt_join(hi, d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+    label_set_if_changed(p->hi_lbl, buf);
+
+    const float q[3] = { d->p50, d->p90, d->p99 };
+    for (int i = 0; i < 3; i++) {
+        if (isfinite(q[i])) {
+            ui_fmt_join(q[i], d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+            label_set_if_changed(p->q_val[i], buf);
+            text_color_if_changed(p->q_val[i], COL_TEXT);
+        } else {
+            label_set_if_changed(p->q_val[i], "--");
+            text_color_if_changed(p->q_val[i], COL_STALE);
+        }
+    }
+}
+
+static void hist_destroy(tile_inst_t *t) { lv_mem_free(t->priv); t->priv = NULL; }
+
+const tile_vt_t tile_hist_vt = {
+    /* Needs a 2x2: three quantile rows plus bars will not fit in 128px, and
+     * the fallback to a plain p99 number is the honest degradation. */
+    "Histogram", 2, 2, TILE_STAT, hist_build, hist_update, hist_destroy,
+};

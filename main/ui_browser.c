@@ -228,10 +228,19 @@ static void add_panel_for(const cat_entry_t *e)
     switch (e->type) {
     case PROM_TYPE_HISTOGRAM:
     case PROM_TYPE_SUMMARY:
-        /* A cumulative-since-boot histogram barely moves, so the useful
-         * default is a tail quantile rather than the raw family. */
+        /*
+         * Show the distribution, not just a number. Reducing a histogram to
+         * one p99 throws away the shape, which is usually the interesting
+         * part -- a bimodal latency distribution and a smooth one can share a
+         * p99 and mean entirely different things.
+         *
+         * q is still set because the renderer falls back to a plain quantile
+         * when the tile is too small for bars.
+         */
         p->q    = 0.99f;
-        p->kind = TILE_STAT;
+        p->kind = TILE_HIST;
+        p->w    = 2;
+        p->h    = 2;
         break;
     case PROM_TYPE_COUNTER:
         p->kind = TILE_SPARK;      /* a rate is only meaningful over time */

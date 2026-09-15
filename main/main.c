@@ -310,6 +310,15 @@ static void dashboard_tick(lv_timer_t *timer)
                 .num          = m->num,
                 .suffix       = m->suffix,
                 .numeric_only = m->numeric_only,
+                .has_hist     = m->has_hist,
+                .n_buckets    = m->n_buckets,
+                .bucket_le    = m->bucket_le,
+                .bucket_share = m->bucket_share,
+                .p50          = m->p50,
+                .p90          = m->p90,
+                .p99          = m->p99,
+                .fmt          = (fmt_mode_t)m->fmt,
+                .unit         = m->unit,
             };
             tile_update(s_tiles[i], &d);
         }
