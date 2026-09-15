@@ -9,6 +9,7 @@
 #include "ui_tile.h"
 #include "ui_widgets.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,6 +18,8 @@ static lv_obj_t *s_kind_btn[TILE_KIND_COUNT];
 static lv_obj_t *s_size_btn[4];
 static lv_obj_t *s_multi_lbl, *s_sel_lbl, *s_title_lbl;
 static lv_obj_t *s_op_btn[5], *s_selb_lbl;
+static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
+static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
 static uint16_t  s_id;
 static void (*s_on_close)(void);
 
@@ -31,6 +34,22 @@ static const struct { uint8_t w, h; const char *name; } k_sizes[4] = {
  * than for their arithmetic: nobody thinks "a/(a+b)", they think "what share
  * of the total is this".
  */
+/* Quantiles worth a button. p50/p90/p99 is the usual trio; anything finer
+ * needs more observations than a 5s scrape of a quiet service provides. */
+static const struct { float q; const char *name; } k_quants[3] = {
+    { 0.50f, "p50" }, { 0.90f, "p90" }, { 0.99f, "p99" },
+};
+
+/*
+ * How much history the quantile covers. All-time is offered but is almost
+ * never right: on a long-lived process it is dominated by old observations
+ * and stops moving -- measured on a real server, all-time p99 read 72s while
+ * the live traffic was at 0.6s.
+ */
+static const struct { uint16_t s; const char *name; } k_windows[4] = {
+    { 60, "1 min" }, { 300, "5 min" }, { 900, "15 min" }, { 0, "all time" },
+};
+
 static const struct { panel_op_t op; const char *name; } k_ops[5] = {
     { OP_NONE,  "single"  },
     { OP_SHARE, "share %" },   /* a / (a+b) -- hit rate, error rate */
@@ -65,6 +84,35 @@ static void refresh(void)
         bool on = (p->w == k_sizes[i].w && p->h == k_sizes[i].h);
         bg_color_if_changed(s_size_btn[i], on ? COL_ACCENT : COL_PANEL);
         lv_obj_t *l = lv_obj_get_child(s_size_btn[i], 0);
+        if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
+    }
+
+    /*
+     * A histogram panel already reduces a distribution to one number, so the
+     * controls it needs are WHICH number and over how long -- not how to
+     * combine it with a second series. The two sets share the row rather than
+     * making the sheet taller than the screen.
+     */
+    bool hist = (p->q > 0.0f);
+    for (int i = 0; i < 3; i++) hidden_if_changed(s_q_btn[i], !hist);
+    for (int i = 0; i < 4; i++) hidden_if_changed(s_win_btn[i], !hist);
+    hidden_if_changed(s_q_cap, !hist);
+    hidden_if_changed(s_win_cap, !hist);
+    for (int i = 0; i < 5; i++) hidden_if_changed(s_op_btn[i], hist);
+    hidden_if_changed(s_op_cap, hist);
+    hidden_if_changed(s_selb_cap, hist);
+    hidden_if_changed(s_selb_btn, hist);
+
+    for (int i = 0; i < 3; i++) {
+        bool on = (fabsf(p->q - k_quants[i].q) < 0.001f);
+        bg_color_if_changed(s_q_btn[i], on ? COL_ACCENT : COL_PANEL);
+        lv_obj_t *l = lv_obj_get_child(s_q_btn[i], 0);
+        if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
+    }
+    for (int i = 0; i < 4; i++) {
+        bool on = (p->window_s == k_windows[i].s);
+        bg_color_if_changed(s_win_btn[i], on ? COL_ACCENT : COL_PANEL);
+        lv_obj_t *l = lv_obj_get_child(s_win_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
     }
 
@@ -177,6 +225,24 @@ static void selb_cb(lv_event_t *e)
         return;
     }
     ui_browser_open_select(selb_chosen);
+}
+
+static void q_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    p->q = k_quants[(int)(intptr_t)lv_event_get_user_data(e)].q;
+    config_touch();
+    refresh();
+}
+
+static void win_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    p->window_s = k_windows[(int)(intptr_t)lv_event_get_user_data(e)].s;
+    config_touch();
+    refresh();
 }
 
 static void op_cb(lv_event_t *e)
@@ -326,22 +392,42 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     lv_obj_set_width(s_title_lbl, 160);
 
     /* combine with a second series */
-    lv_obj_t *oc = make_label(s_root, FONT_S, COL_DIM);
-    lv_label_set_text(oc, "Combine");
-    lv_obj_set_pos(oc, GRID_MX, y + 140);
+    /* Histogram controls and Combine share this row; refresh() shows one. */
+    s_q_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_q_cap, "Quantile");
+    lv_obj_set_pos(s_q_cap, GRID_MX, y + 140);
+    for (int i = 0; i < 3; i++) {
+        s_q_btn[i] = make_btn(s_root, k_quants[i].name, q_cb, (void *)(intptr_t)i);
+        lv_obj_set_size(s_q_btn[i], 92, 42);
+        lv_obj_set_pos(s_q_btn[i], GRID_MX + i * 98, y + 162);
+    }
+
+    s_win_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_win_cap, "Over the last");
+    lv_obj_set_pos(s_win_cap, GRID_MX + 310, y + 140);
+    for (int i = 0; i < 4; i++) {
+        s_win_btn[i] = make_btn(s_root, k_windows[i].name, win_cb,
+                                (void *)(intptr_t)i);
+        lv_obj_set_size(s_win_btn[i], 110, 42);
+        lv_obj_set_pos(s_win_btn[i], GRID_MX + 310 + i * 116, y + 162);
+    }
+
+    s_op_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_op_cap, "Combine");
+    lv_obj_set_pos(s_op_cap, GRID_MX, y + 140);
     for (int i = 0; i < 5; i++) {
         s_op_btn[i] = make_btn(s_root, k_ops[i].name, op_cb, (void *)(intptr_t)i);
         lv_obj_set_size(s_op_btn[i], 92, 42);
         lv_obj_set_pos(s_op_btn[i], GRID_MX + i * 98, y + 162);
     }
 
-    lv_obj_t *bc = make_label(s_root, FONT_S, COL_DIM);
-    lv_label_set_text(bc, "with");
-    lv_obj_set_pos(bc, GRID_MX + 500, y + 140);
-    lv_obj_t *bbtn = make_btn(s_root, "", selb_cb, NULL);
-    lv_obj_set_size(bbtn, 270, 42);
-    lv_obj_set_pos(bbtn, GRID_MX + 500, y + 162);
-    s_selb_lbl = lv_obj_get_child(bbtn, 0);
+    s_selb_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_selb_cap, "with");
+    lv_obj_set_pos(s_selb_cap, GRID_MX + 500, y + 140);
+    s_selb_btn = make_btn(s_root, "", selb_cb, NULL);
+    lv_obj_set_size(s_selb_btn, 270, 42);
+    lv_obj_set_pos(s_selb_btn, GRID_MX + 500, y + 162);
+    s_selb_lbl = lv_obj_get_child(s_selb_btn, 0);
     lv_label_set_long_mode(s_selb_lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_selb_lbl, 240);
 

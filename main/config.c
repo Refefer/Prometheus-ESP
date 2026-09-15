@@ -141,6 +141,7 @@ static esp_err_t write_config(const char *path)
         fprintf(f, ", \"kind\": %u, \"fmt\": %u, \"agg\": %u",
                 (unsigned)p->kind, (unsigned)p->fmt, (unsigned)p->agg);
         fputs(", \"q\": ", f);    write_float(f, p->q);
+        fprintf(f, ", \"window_s\": %u", (unsigned)p->window_s);
         fputs(", \"vmin\": ", f); write_float(f, p->vmin);
         fputs(", \"vmax\": ", f); write_float(f, p->vmax);
         fputs(", \"warn\": ", f); write_float(f, p->warn);
@@ -327,6 +328,7 @@ static bool parse_into(const char *json, size_t len)
             p->agg  = (agg_mode_t)get_int(it, "agg", AGG_LAST);
             float q = get_float(it, "q");
             p->q    = isnan(q) ? 0.0f : q;
+            p->window_s = (uint16_t)get_int(it, "window_s", 300);
             p->vmin = get_float(it, "vmin");
             p->vmax = get_float(it, "vmax");
             p->warn = get_float(it, "warn");

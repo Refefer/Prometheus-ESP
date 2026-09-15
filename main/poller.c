@@ -44,6 +44,19 @@ typedef struct {
 
     /* Second operand for a derived panel. Its own scratch, because
      * prom_parse_selector unescapes in place and the label pointers alias it. */
+    /*
+     * Baseline for a windowed quantile: the bucket counts as of window_s ago,
+     * and when they were taken. One snapshot rather than a ring, so the
+     * effective window drifts between window_s and window_s + one poll --
+     * which is well inside the noise of the thing being measured and costs
+     * 256 bytes instead of kilobytes.
+     */
+    uint16_t     window_s;
+    double       base_cum[PROM_MAX_BUCKETS];
+    double       base_le[PROM_MAX_BUCKETS];
+    int          base_nb;
+    int64_t      base_t;
+
     panel_op_t   op;
     char         scratch_b[CFG_SEL_MAX];
     const char  *name_b;
@@ -430,15 +443,58 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                     sc->le[b + 1] = kl; sc->cum[b + 1] = kc;
                 }
                 prom_hist_repair(sc->cum, sc->nb);
-                shown = prom_hist_quantile((double)w->q, sc->le, sc->cum, sc->nb);
 
-                /* Also hand the distribution up, so a histogram can be shown
-                 * as one rather than reduced to a single number. */
-                m->p50 = (float)prom_hist_quantile(0.50, sc->le, sc->cum, sc->nb);
-                m->p90 = (float)prom_hist_quantile(0.90, sc->le, sc->cum, sc->nb);
-                m->p99 = (float)prom_hist_quantile(0.99, sc->le, sc->cum, sc->nb);
+                /*
+                 * Difference against the baseline so the quantile describes
+                 * the last window_s of observations rather than the process's
+                 * whole life. window_s == 0 keeps the all-time behaviour.
+                 */
+                double use_cum[PROM_MAX_BUCKETS];
+                int    use_nb = sc->nb;
+                bool   ready  = true;
 
-                double total = sc->cum[sc->nb - 1];
+                if (w->window_s > 0) {
+                    bool same = (w->base_nb == sc->nb);
+                    for (int b = 0; same && b < sc->nb; b++) {
+                        if (w->base_le[b] != sc->le[b]) same = false;
+                    }
+
+                    if (!same) {
+                        /* Bucket bounds changed (or first sight): re-baseline
+                         * and show nothing rather than differencing against a
+                         * distribution that no longer exists. */
+                        ready = false;
+                    } else {
+                        for (int b = 0; b < sc->nb; b++) {
+                            use_cum[b] = sc->cum[b] - w->base_cum[b];
+                            /* A negative delta means the exporter restarted;
+                             * the whole window is discarded rather than
+                             * producing a garbage quantile from it. */
+                            if (use_cum[b] < 0) ready = false;
+                        }
+                        if (ready && use_cum[use_nb - 1] <= 0) ready = false;
+                    }
+
+                    if (!same || (t - w->base_t) >= (int64_t)w->window_s * 1000) {
+                        memcpy(w->base_cum, sc->cum, sizeof(double) * sc->nb);
+                        memcpy(w->base_le,  sc->le,  sizeof(double) * sc->nb);
+                        w->base_nb = sc->nb;
+                        w->base_t  = t;
+                    }
+                } else {
+                    memcpy(use_cum, sc->cum, sizeof(double) * sc->nb);
+                }
+
+                if (!ready) {
+                    m->warming = true;
+                } else {
+                    shown  = prom_hist_quantile((double)w->q, sc->le, use_cum, use_nb);
+                    m->p50 = (float)prom_hist_quantile(0.50, sc->le, use_cum, use_nb);
+                    m->p90 = (float)prom_hist_quantile(0.90, sc->le, use_cum, use_nb);
+                    m->p99 = (float)prom_hist_quantile(0.99, sc->le, use_cum, use_nb);
+                }
+
+                double total = ready ? use_cum[use_nb - 1] : 0;
                 if (total > 0) {
                     /* Merge down to what a tile can actually draw: keep the
                      * first N-1 bounds and lump everything above into the
@@ -448,7 +504,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                     double prev = 0;
                     for (int b = 0; b < keep; b++) {
                         bool last = (b == keep - 1);
-                        double cum = last ? total : sc->cum[b];
+                        double cum = last ? total : use_cum[b];
                         m->bucket_le[b]    = last ? (float)INFINITY
                                                   : (float)sc->le[b];
                         m->bucket_share[b] = (float)((cum - prev) / total);
@@ -754,6 +810,7 @@ void poller_reload(void)
         w->agg      = p->agg;
         w->fmt      = p->fmt;
         w->q        = p->q;
+        w->window_s = p->window_s;
         w->multi    = p->multi;
         w->op       = p->op;
         if (w->op != OP_NONE && p->sel_b[0]) {

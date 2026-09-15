@@ -368,7 +368,8 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
          * q is still set because the renderer falls back to a plain quantile
          * when the tile is too small for bars.
          */
-        p->q    = 0.99f;
+        p->q        = 0.99f;
+        p->window_s = 300;      /* 5 minutes; all-time stops moving */
         p->kind = TILE_HIST;
         p->w    = 2;
         p->h    = 2;

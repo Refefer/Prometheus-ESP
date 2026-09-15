@@ -75,6 +75,16 @@ typedef struct {
     char        unit[8];
     float       q;                   /* quantile for histogram/summary panels,
                                       * 0 => not a quantile panel */
+    /*
+     * Seconds of observations the quantile is taken over. 0 means all-time:
+     * every observation since the exporter's process started.
+     *
+     * All-time is almost never what a panel wants. A long-lived process
+     * accumulates enough history that one bad afternoon is permanently baked
+     * in -- measured on a real inference server, the all-time p99 read 72s
+     * while the last 30 seconds of traffic were at 0.6s.
+     */
+    uint16_t    window_s;
     float       vmin, vmax;          /* NAN => auto */
     float       warn, crit;          /* NAN => no threshold */
     bool        lower_is_worse;
