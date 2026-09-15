@@ -21,7 +21,7 @@ static lv_obj_t *s_op_btn[5], *s_selb_lbl;
 static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
 static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
 static lv_obj_t *s_pos_lbl;
-static void (*s_on_change)(void);
+static lv_obj_t *s_map_cell[GRID_ROWS][GRID_COLS];
 static uint16_t  s_id;
 static void (*s_on_close)(void);
 
@@ -140,6 +140,34 @@ static void refresh(void)
 
     label_set_fmt_if_changed(s_pos_lbl, "col %u  row %u   %ux%u",
                              p->col, p->row, p->w ? p->w : 1, p->h ? p->h : 1);
+
+    /*
+     * A miniature of the grid, so a move is visible without repainting the
+     * dashboard underneath -- which cannot be seen through an opaque
+     * full-screen sheet, and which draws over it if attempted.
+     */
+    const config_t *c = config_get();
+    uint8_t pw = p->w ? p->w : 1, ph = p->h ? p->h : 1;
+    for (int r = 0; r < GRID_ROWS; r++) {
+        for (int cc = 0; cc < GRID_COLS; cc++) {
+            bool mine = (cc >= p->col && cc < p->col + pw &&
+                         r  >= p->row && r  < p->row + ph);
+            bool taken = false;
+            for (int i = 0; i < c->n_panels && !taken; i++) {
+                const cfg_panel_t *o = &c->panels[i];
+                if (o == p || !o->sel[0] || o->screen != p->screen) continue;
+                uint8_t ow = o->w ? o->w : 1, oh = o->h ? o->h : 1;
+                taken = (cc >= o->col && cc < o->col + ow &&
+                         r  >= o->row && r  < o->row + oh);
+            }
+            lv_obj_t *cell = s_map_cell[r][cc];
+            bg_color_if_changed(cell, mine ? COL_ACCENT
+                                     : taken ? COL_PANEL_ALT : COL_BG);
+            lv_obj_set_style_bg_opa(cell, mine ? LV_OPA_COVER
+                                         : taken ? LV_OPA_COVER : LV_OPA_20, 0);
+            border_color_if_changed(cell, mine ? COL_ACCENT : COL_LINE);
+        }
+    }
 
     label_set_if_changed(s_multi_lbl, p->multi ? "all series" : "one series");
     label_set_if_changed(s_title_lbl, p->title[0] ? p->title : "(metric name)");
@@ -302,9 +330,6 @@ static void move_cb(lv_event_t *e)
         return;
     }
     refresh();
-    /* Repaint the dashboard underneath immediately: moving a tile you cannot
-     * see move is guesswork. */
-    if (s_on_change) s_on_change();
 }
 
 static void title_done(const char *text, void *user)
@@ -358,7 +383,6 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     if (s_root) return;
     s_id = panel_id;
     s_on_close  = on_close;
-    s_on_change = on_close;   /* same rebuild, run live rather than on close */
     if (panel() == NULL) return;
 
     s_root = lv_obj_create(lv_scr_act());
@@ -487,7 +511,24 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     }
 
     s_pos_lbl = make_label(s_root, FONT_M, COL_DIM);
-    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 330, -24);
+    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 330, -46);
+
+    /* 4x3 miniature, 22x16 cells. Small enough to sit beside the arrows,
+     * large enough that a 1x1 in a corner is unmistakable. */
+    for (int r = 0; r < GRID_ROWS; r++) {
+        for (int cc = 0; cc < GRID_COLS; cc++) {
+            lv_obj_t *cell = lv_obj_create(s_root);
+            lv_obj_set_size(cell, 22, 16);
+            lv_obj_set_style_radius(cell, 2, 0);
+            lv_obj_set_style_border_width(cell, 1, 0);
+            lv_obj_set_style_pad_all(cell, 0, 0);
+            lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_clear_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_align(cell, LV_ALIGN_BOTTOM_LEFT,
+                         GRID_MX + 336 + cc * 25, -12 - (GRID_ROWS - 1 - r) * 19);
+            s_map_cell[r][cc] = cell;
+        }
+    }
 
     lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove", remove_cb, NULL);
     lv_obj_set_size(rm, 180, BTN_H);

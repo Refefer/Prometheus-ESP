@@ -169,8 +169,27 @@ static lv_obj_t    *s_ftr_right;
 static lv_obj_t    *s_empty;
 static uint32_t     s_seen_gen = UINT32_MAX;
 
+/*
+ * True while a full-screen modal owns the display.
+ *
+ * Rebuilding tiles underneath one is worse than useless: lv_obj_create
+ * appends to the parent's child list, so freshly built tiles draw ON TOP of
+ * the overlay that is supposed to be covering them. Nothing is visible of the
+ * rebuild anyway, since the overlay is opaque.
+ */
+static bool modal_open(void)
+{
+    return ui_panelcfg_is_open() || ui_browser_is_open() ||
+           ui_endpoints_is_open() || ui_setup_is_open();
+}
+
 static void build_tiles(lv_obj_t *scr)
 {
+    if (modal_open()) {
+        /* Deferred: every modal rebuilds on close, so nothing is lost. */
+        return;
+    }
+
     for (int i = 0; i < s_tile_n; i++) {
         if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
     }
