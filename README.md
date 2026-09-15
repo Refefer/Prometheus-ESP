@@ -47,8 +47,9 @@ First boot lands in the WiFi wizard. After that:
 - **gear** -- the endpoint: URL, name, poll interval, and a Test button that
   distinguishes a wrong host from a wrong path from "that is a web page".
 - **a `+` on an empty cell** -- choose what goes there, then how it looks.
-- **any tile** -- widget type, span, title, one-series vs all-series, and
-  combining it with a second series.
+- **any tile** -- widget type, span, position, title, one-series vs
+  all-series, and combining it with a second series. The arrows move it one
+  cell, swapping with a same-size neighbour rather than refusing.
 - **list button** -- browse everything the endpoint exposes; `Show: selected`
   filters to what is already on screen, which is the view for removing tiles.
 
@@ -64,7 +65,7 @@ the rate over every series whose mode matches `prefill_*`". So the device
 serves the same JSON that lives on its flash:
 
 ```sh
-TOK=...                      # printed on the console until it is first used
+TOK=...                      # shown on the device: gear -> Config push
 D=192.168.1.50
 
 curl -H "X-Auth: $TOK" http://$D/config > panel.json

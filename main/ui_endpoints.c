@@ -4,6 +4,9 @@
 #include "http_util.h"
 #include "lvgl_port.h"
 #include "poller.h"
+#include "secrets.h"
+#include "webcfg.h"
+#include "wifi_mgr.h"
 #include "prom_text.h"
 #include "ui_kbd.h"
 #include "ui_layout.h"
@@ -29,6 +32,8 @@ static char s_name[CFG_NAME_MAX];
 static int  s_poll_s = 10;
 
 static volatile bool s_testing;
+
+static lv_obj_t *s_tok_lbl, *s_push_lbl;
 
 /*
  * One-tap insertions. A URL typed character by character on a touchscreen is
@@ -133,6 +138,56 @@ static void test_cb(lv_event_t *e)
     text_color_if_changed(s_result, COL_DIM);
     /* 8KB: TLS handshake plus the streaming parser. */
     xTaskCreate(test_task, "ep_test", 8192, s_url, 4, NULL);
+}
+
+/* --------------------------------------------------------- config push */
+
+static void show_push(void)
+{
+    char ip[16] = "";
+    wifi_mgr_info(ip, sizeof(ip), NULL);
+    label_set_fmt_if_changed(s_push_lbl, "POST  http://%s/config",
+                             ip[0] ? ip : "(offline)");
+
+    char tok[SECRETS_TOKEN_MAX] = "";
+    secrets_get_token(tok, sizeof(tok));
+    /* Shown in full rather than masked: this is the device's own screen, and
+     * anyone reading it is already standing in front of the panel. Masking it
+     * would only mean copying it somewhere less safe. */
+    label_set_if_changed(s_tok_lbl, tok[0] ? tok : "(disabled)");
+}
+
+static void token_done(const char *text, void *user)
+{
+    (void)user;
+    if (text == NULL) return;
+    secrets_set_token(text);
+    show_push();
+}
+
+static void token_cb(lv_event_t *e)
+{
+    (void)e;
+    char tok[SECRETS_TOKEN_MAX] = "";
+    secrets_get_token(tok, sizeof(tok));
+    ui_kbd_req_t req = {
+        .title = "Config push token",
+        .label = "Sent as the X-Auth header",
+        .value = tok,
+        .hint  = "Empty disables the push endpoint entirely.",
+        .kind  = KB_URL,   /* hex and punctuation without a mode switch */
+        .done  = token_done,
+    };
+    ui_kbd_edit(&req);
+}
+
+static void regen_cb(lv_event_t *e)
+{
+    (void)e;
+    char tok[SECRETS_TOKEN_MAX] = "";
+    secrets_new_token(tok, sizeof(tok));
+    show_push();
+    ui_toast("New token - update anything that pushes config", SEV_WARN, 3000);
 }
 
 /* ------------------------------------------------------------- editing */
@@ -305,6 +360,33 @@ void ui_endpoints_open(void (*on_close)(void))
     lv_label_set_long_mode(s_result, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(s_result, GRID_MX + 180, 258);
     label_set_if_changed(s_result, "not tested");
+
+    /* config push */
+    lv_obj_t *pdiv = make_divider(s_root, SCR_W - 2 * (GRID_MX + 8));
+    lv_obj_set_pos(pdiv, GRID_MX + 8, 316);
+
+    lv_obj_t *pc = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(pc, "Config push");
+    lv_obj_set_pos(pc, GRID_MX + 8, 326);
+
+    s_push_lbl = make_label(s_root, FONT_M, COL_TEXT);
+    lv_obj_set_pos(s_push_lbl, GRID_MX + 8, 350);
+
+    lv_obj_t *tc = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(tc, "X-Auth");
+    lv_obj_set_pos(tc, GRID_MX + 400, 326);
+
+    lv_obj_t *tokbtn = make_btn(s_root, "", token_cb, NULL);
+    lv_obj_set_size(tokbtn, 230, 40);
+    lv_obj_set_pos(tokbtn, GRID_MX + 400, 344);
+    s_tok_lbl = lv_obj_get_child(tokbtn, 0);
+    lv_obj_set_style_text_font(s_tok_lbl, FONT_M, 0);
+
+    lv_obj_t *rb = make_btn(s_root, LV_SYMBOL_REFRESH, regen_cb, NULL);
+    lv_obj_set_size(rb, 56, 40);
+    lv_obj_set_pos(rb, GRID_MX + 640, 344);
+
+    show_push();
 
     lv_obj_t *cancel = make_btn(s_root, "Cancel", cancel_cb, NULL);
     lv_obj_set_size(cancel, 160, BTN_H);

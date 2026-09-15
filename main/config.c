@@ -704,6 +704,54 @@ bool config_place_panel(cfg_panel_t *p)
     return false;
 }
 
+/* Panels on the same screen whose area covers any of the given rectangle. */
+static int panels_overlapping(const cfg_panel_t *me, int col, int row,
+                              int w, int h, cfg_panel_t **first)
+{
+    int n = 0;
+    *first = NULL;
+    for (int i = 0; i < s_cfg.n_panels; i++) {
+        cfg_panel_t *o = &s_cfg.panels[i];
+        if (o == me || !o->sel[0] || o->screen != me->screen) continue;
+        int ow = o->w ? o->w : 1, oh = o->h ? o->h : 1;
+        bool overlap = !(col + w <= o->col || o->col + ow <= col ||
+                         row + h <= o->row || o->row + oh <= row);
+        if (overlap) { if (!*first) *first = o; n++; }
+    }
+    return n;
+}
+
+bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow)
+{
+    int w = p->w ? p->w : 1, h = p->h ? p->h : 1;
+    int col = (int)p->col + dcol, row = (int)p->row + drow;
+
+    if (col < 0 || row < 0 || col + w > GRID_COLS || row + h > GRID_ROWS) {
+        return false;
+    }
+
+    cfg_panel_t *other = NULL;
+    int n = panels_overlapping(p, col, row, w, h, &other);
+
+    if (n == 0) {
+        p->col = (uint8_t)col; p->row = (uint8_t)row;
+        config_touch();
+        return true;
+    }
+
+    /* Exactly one neighbour, same shape: trade places. Anything else would
+     * need a real packing decision, and guessing wrong rearranges a layout
+     * the user built deliberately. */
+    if (n == 1 && other &&
+        (other->w ? other->w : 1) == w && (other->h ? other->h : 1) == h) {
+        other->col = p->col; other->row = p->row;
+        p->col = (uint8_t)col; p->row = (uint8_t)row;
+        config_touch();
+        return true;
+    }
+    return false;
+}
+
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id)
 {
     for (int i = 0; i < s_cfg.n_endpoints; i++) {

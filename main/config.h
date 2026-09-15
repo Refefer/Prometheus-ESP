@@ -215,6 +215,16 @@ bool         config_has_panel(uint16_t ep_id, const char *sel);
  * the screen is full. Spans come from the renderer's natural size. */
 bool config_place_panel(cfg_panel_t *p);
 
+/*
+ * Move a panel one cell in a direction.
+ *
+ * Moves into free space, and SWAPS with a single neighbour of the same span
+ * rather than refusing -- reordering two tiles is the common case, and making
+ * the user empty a cell first to do it would be tedious. Returns false when
+ * neither is possible, so the caller can say why.
+ */
+bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow);
+
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id);
 cfg_endpoint_t *config_endpoint_add(void);
 void            config_endpoint_remove(uint16_t id);

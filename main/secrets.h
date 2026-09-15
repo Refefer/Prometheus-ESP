@@ -38,6 +38,10 @@ esp_err_t secrets_del_ep_auth(uint16_t ep_id);
 #define SECRETS_TOKEN_MAX 17          /* 16 hex chars + NUL */
 esp_err_t secrets_get_token(char *buf, size_t cap);
 esp_err_t secrets_new_token(char *buf, size_t cap);
+/* Set it explicitly, so a token can be pinned to something a script already
+ * knows rather than copied off the screen. Empty clears it, which disables
+ * the push endpoint rather than leaving it open. */
+esp_err_t secrets_set_token(const char *tok);
 
 /* Factory reset: wipes the whole namespace. */
 esp_err_t secrets_erase_all(void);

@@ -144,17 +144,20 @@ esp_err_t secrets_new_token(char *buf, size_t cap)
     err = nvs_set_str(h, KEY_TOKEN, buf);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
-    /*
-     * Logged deliberately.
-     *
-     * The threat this token defends against is something else ON THE LAN
-     * rewriting the dashboard. Reading it requires the USB console, which is
-     * physical access to the device -- the same trust level as reading it off
-     * the screen, and strictly higher than being on the network. Withholding
-     * it here would only mean a device you cannot set up without standing in
-     * front of it, which is the thing the push endpoint exists to avoid.
-     */
-    ESP_LOGW(TAG, "push token: %s", buf);
+    /* Never logged: it is shown on the device's own screen, which is the one
+     * place that needs no second channel to reach. */
+    ESP_LOGI(TAG, "push token regenerated");
+    return err;
+}
+
+esp_err_t secrets_set_token(const char *tok)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, KEY_TOKEN, tok ? tok : "");
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
     return err;
 }
 

@@ -20,6 +20,8 @@ static lv_obj_t *s_multi_lbl, *s_sel_lbl, *s_title_lbl;
 static lv_obj_t *s_op_btn[5], *s_selb_lbl;
 static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
 static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
+static lv_obj_t *s_pos_lbl;
+static void (*s_on_change)(void);
 static uint16_t  s_id;
 static void (*s_on_close)(void);
 
@@ -135,6 +137,9 @@ static void refresh(void)
                                           : "tap to choose the other series");
     text_color_if_changed(s_selb_lbl,
                           (p->op != OP_NONE && !have_b) ? COL_WARN : COL_TEXT);
+
+    label_set_fmt_if_changed(s_pos_lbl, "col %u  row %u   %ux%u",
+                             p->col, p->row, p->w ? p->w : 1, p->h ? p->h : 1);
 
     label_set_if_changed(s_multi_lbl, p->multi ? "all series" : "one series");
     label_set_if_changed(s_title_lbl, p->title[0] ? p->title : "(metric name)");
@@ -284,6 +289,24 @@ static void op_cb(lv_event_t *e)
     refresh();
 }
 
+static void move_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    int d = (int)(intptr_t)lv_event_get_user_data(e);
+    int dc = (d == 0) ? -1 : (d == 1) ? 1 : 0;
+    int dr = (d == 2) ? -1 : (d == 3) ? 1 : 0;
+
+    if (!config_nudge_panel(p, dc, dr)) {
+        ui_toast("Blocked - the neighbour is a different size", SEV_WARN, 2000);
+        return;
+    }
+    refresh();
+    /* Repaint the dashboard underneath immediately: moving a tile you cannot
+     * see move is guesswork. */
+    if (s_on_change) s_on_change();
+}
+
 static void title_done(const char *text, void *user)
 {
     (void)user;
@@ -334,7 +357,8 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
 {
     if (s_root) return;
     s_id = panel_id;
-    s_on_close = on_close;
+    s_on_close  = on_close;
+    s_on_change = on_close;   /* same rebuild, run live rather than on close */
     if (panel() == NULL) return;
 
     s_root = lv_obj_create(lv_scr_act());
@@ -447,10 +471,27 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     lv_label_set_long_mode(s_selb_lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_selb_lbl, 240);
 
-    lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove tile",
-                            remove_cb, NULL);
-    lv_obj_set_size(rm, 220, BTN_H);
-    lv_obj_align(rm, LV_ALIGN_BOTTOM_LEFT, GRID_MX, -16);
+    /* Position. Arrows rather than drag-and-drop: a corner drag on a 185px
+     * tile with a fingertip is a coin flip, and an arrow is unambiguous. */
+    lv_obj_t *poscap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(poscap, "Position");
+    lv_obj_align(poscap, LV_ALIGN_BOTTOM_LEFT, GRID_MX, -62);
+
+    static const char *const arrows[4] = {
+        LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, LV_SYMBOL_UP, LV_SYMBOL_DOWN
+    };
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *b = make_btn(s_root, arrows[i], move_cb, (void *)(intptr_t)i);
+        lv_obj_set_size(b, 72, BTN_H);
+        lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, GRID_MX + i * 78, -12);
+    }
+
+    s_pos_lbl = make_label(s_root, FONT_M, COL_DIM);
+    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 330, -24);
+
+    lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove", remove_cb, NULL);
+    lv_obj_set_size(rm, 180, BTN_H);
+    lv_obj_align(rm, LV_ALIGN_BOTTOM_RIGHT, -GRID_MX, -12);
 
     refresh();
 }

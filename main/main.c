@@ -379,21 +379,6 @@ static void dashboard_tick(lv_timer_t *timer)
         }
     }
 
-    /*
-     * Repeat the push command until the token has actually been used. The
-     * boot log is gone by the time anyone attaches a console -- the native USB
-     * re-enumerates on reset -- so a one-shot line is a token nobody can read.
-     * It stops the first time a request authenticates.
-     */
-    static int setup_beat;
-    if (webcfg_running() && !webcfg_ever_used() && setup_beat++ % 120 == 0) {
-        char tok[SECRETS_TOKEN_MAX] = "", ip[16] = "";
-        secrets_get_token(tok, sizeof(tok));
-        wifi_mgr_info(ip, sizeof(ip), NULL);
-        ESP_LOGW(TAG, "push config with:  curl -H 'X-Auth: %s' http://%s/config",
-                 tok, ip);
-    }
-
     static int beat;
     if (beat++ % 20 == 0) {
         ESP_LOGI(TAG, "ui alive: tiles=%d seen_gen=%u stack_hw=%u",
