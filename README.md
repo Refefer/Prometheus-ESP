@@ -48,8 +48,10 @@ First boot lands in the WiFi wizard. After that:
   distinguishes a wrong host from a wrong path from "that is a web page".
 - **a `+` on an empty cell** -- choose what goes there, then how it looks.
 - **any tile** -- widget type, span, position, title, one-series vs
-  all-series, and combining it with a second series. The arrows move it one
-  cell, swapping with a same-size neighbour rather than refusing.
+  all-series, and combining it with a second series. The arrows nudge it one
+  cell; the 4x3 miniature beside them places it anywhere it fits -- tap a
+  cell to put the tile's top-left there. Cells outlined green can take it at
+  its current size, which is what makes a 2x2 chart movable on a busy grid.
 - **list button** -- browse everything the endpoint exposes; `Show: selected`
   filters to what is already on screen, which is the view for removing tiles.
 

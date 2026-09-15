@@ -721,11 +721,19 @@ static int panels_overlapping(const cfg_panel_t *me, int col, int row,
     return n;
 }
 
-bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow)
+bool config_panel_fits(const cfg_panel_t *p, int col, int row)
 {
     int w = p->w ? p->w : 1, h = p->h ? p->h : 1;
-    int col = (int)p->col + dcol, row = (int)p->row + drow;
+    if (col < 0 || row < 0 || col + w > GRID_COLS || row + h > GRID_ROWS) {
+        return false;
+    }
+    cfg_panel_t *first = NULL;
+    return panels_overlapping(p, col, row, w, h, &first) == 0;
+}
 
+bool config_move_panel(cfg_panel_t *p, int col, int row)
+{
+    int w = p->w ? p->w : 1, h = p->h ? p->h : 1;
     if (col < 0 || row < 0 || col + w > GRID_COLS || row + h > GRID_ROWS) {
         return false;
     }
@@ -739,9 +747,14 @@ bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow)
         return true;
     }
 
-    /* Exactly one neighbour, same shape: trade places. Anything else would
-     * need a real packing decision, and guessing wrong rearranges a layout
-     * the user built deliberately. */
+    /*
+     * Exactly one occupant of the same shape: trade places.
+     *
+     * Anything else is refused rather than guessed at. Displacing two tiles to
+     * make room for a 2x2 means choosing where they go, and choosing wrong
+     * rearranges a layout someone built deliberately -- which is worse than
+     * being told the move is not available.
+     */
     if (n == 1 && other &&
         (other->w ? other->w : 1) == w && (other->h ? other->h : 1) == h) {
         other->col = p->col; other->row = p->row;
@@ -750,6 +763,11 @@ bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow)
         return true;
     }
     return false;
+}
+
+bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow)
+{
+    return config_move_panel(p, (int)p->col + dcol, (int)p->row + drow);
 }
 
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id)

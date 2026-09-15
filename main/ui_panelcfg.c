@@ -160,12 +160,19 @@ static void refresh(void)
                 taken = (cc >= o->col && cc < o->col + ow &&
                          r  >= o->row && r  < o->row + oh);
             }
+            /* Would the tile's top-left land here? That is what the cell
+             * offers, so that is what it advertises -- a cell that looks free
+             * but cannot take a 2x2 would be a lie. */
+            bool target = config_panel_fits(p, cc, r);
+
             lv_obj_t *cell = s_map_cell[r][cc];
             bg_color_if_changed(cell, mine ? COL_ACCENT
                                      : taken ? COL_PANEL_ALT : COL_BG);
             lv_obj_set_style_bg_opa(cell, mine ? LV_OPA_COVER
                                          : taken ? LV_OPA_COVER : LV_OPA_20, 0);
-            border_color_if_changed(cell, mine ? COL_ACCENT : COL_LINE);
+            border_color_if_changed(cell, mine ? COL_ACCENT
+                                       : target ? COL_OK : COL_LINE);
+            lv_obj_set_style_border_width(cell, (mine || target) ? 2 : 1, 0);
         }
     }
 
@@ -314,6 +321,32 @@ static void op_cb(lv_event_t *e)
     }
     if (p->op != OP_NONE) p->multi = false;   /* the two are incompatible */
     config_touch();
+    refresh();
+}
+
+/*
+ * Tap a cell of the miniature to put the tile's top-left there.
+ *
+ * This is the answer to moving tiles that are not all the same size: arrows
+ * can only step into adjacent space, so a 2x2 on a busy grid has nowhere to
+ * step. Tapping a destination works whatever the span, and the map already
+ * shows which destinations are available.
+ */
+static void map_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    int cc = (int)(packed >> 8), r = (int)(packed & 0xFF);
+
+    if (!config_move_panel(p, cc, r)) {
+        uint8_t w = p->w ? p->w : 1, h = p->h ? p->h : 1;
+        char msg[88];
+        snprintf(msg, sizeof(msg),
+                 "A %ux%u tile does not fit there - free some cells first", w, h);
+        ui_toast(msg, SEV_WARN, 2500);
+        return;
+    }
     refresh();
 }
 
@@ -510,22 +543,30 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
         lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, GRID_MX + i * 78, -12);
     }
 
-    s_pos_lbl = make_label(s_root, FONT_M, COL_DIM);
-    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 330, -46);
+    s_pos_lbl = make_label(s_root, FONT_S, COL_DIM);
+    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX, -40);
+
+    lv_obj_t *maphint = make_label(s_root, FONT_XS, COL_DIM);
+    lv_label_set_text(maphint, "tap a cell to place it");
+    lv_obj_align(maphint, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 336, -82);
 
     /* 4x3 miniature, 22x16 cells. Small enough to sit beside the arrows,
      * large enough that a 1x1 in a corner is unmistakable. */
     for (int r = 0; r < GRID_ROWS; r++) {
         for (int cc = 0; cc < GRID_COLS; cc++) {
             lv_obj_t *cell = lv_obj_create(s_root);
-            lv_obj_set_size(cell, 22, 16);
+            /* 30x20 rather than 22x16: these are touch targets now, and a
+             * 22px cell is under half the comfortable minimum. */
+            lv_obj_set_size(cell, 30, 20);
             lv_obj_set_style_radius(cell, 2, 0);
             lv_obj_set_style_border_width(cell, 1, 0);
             lv_obj_set_style_pad_all(cell, 0, 0);
             lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_clear_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(cell, map_cb, LV_EVENT_CLICKED,
+                                (void *)(uintptr_t)(((uint32_t)cc << 8) | r));
             lv_obj_align(cell, LV_ALIGN_BOTTOM_LEFT,
-                         GRID_MX + 336 + cc * 25, -12 - (GRID_ROWS - 1 - r) * 19);
+                         GRID_MX + 336 + cc * 33, -10 - (GRID_ROWS - 1 - r) * 23);
             s_map_cell[r][cc] = cell;
         }
     }

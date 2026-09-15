@@ -225,6 +225,21 @@ bool config_place_panel(cfg_panel_t *p);
  */
 bool config_nudge_panel(cfg_panel_t *p, int dcol, int drow);
 
+/*
+ * Can this panel sit with its top-left at (col,row)?
+ *
+ * The panel is excluded from the occupancy test, so "where it already is"
+ * counts as free -- otherwise a tile could never be told to stay put, and
+ * every overlap check would have to special-case itself.
+ */
+bool config_panel_fits(const cfg_panel_t *p, int col, int row);
+
+/*
+ * Place a panel at (col,row), swapping with a single same-size occupant if
+ * there is one. Returns false if it neither fits nor swaps cleanly.
+ */
+bool config_move_panel(cfg_panel_t *p, int col, int row);
+
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id);
 cfg_endpoint_t *config_endpoint_add(void);
 void            config_endpoint_remove(uint16_t id);
