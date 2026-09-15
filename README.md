@@ -19,13 +19,52 @@ Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 
 ## Status
 
-| Milestone | |
+Everything below runs on hardware. Nothing about which endpoint is polled or
+which metrics appear is compiled in.
+
+| | |
 |---|---|
-| M0 scaffold: panel, partitions, storage, parser linked | done |
-| M1 exposition parser + host tests | done |
-| M2 first real number from a real exporter | done |
-| M7 on-device WiFi setup (reordered ahead) | done |
-| tile renderers: chart, sparkline, gauge, bar, stat, status | done |
+| Panel, partitions, LittleFS storage | done |
+| Streaming exposition parser (+ host tests) | done |
+| WiFi setup on the glass: scan, password, live reconnect | done |
+| Endpoint editor: URL keyboard, one-tap chips, Test | done |
+| Metric browser: discover, search, tick | done |
+| Two-level drill-down to a specific label set | done |
+| Configure by tapping an empty cell | done |
+| Per-tile settings: widget, span, title, series mode | done |
+| Renderers: stat, sparkline, chart, bar, gauge, status, histogram, multi | done |
+| Derived tiles: share / ratio / difference / sum of two series | done |
+| Config persists across power loss (atomic writes) | done |
+
+Not built yet: multiple screens and swipe, editable warn/crit thresholds,
+SUMMARY and RATE renderers, the PromQL client, OTA, history that survives a
+reboot.
+
+## Using it
+
+First boot lands in the WiFi wizard. After that:
+
+- **gear** -- the endpoint: URL, name, poll interval, and a Test button that
+  distinguishes a wrong host from a wrong path from "that is a web page".
+- **a `+` on an empty cell** -- choose what goes there, then how it looks.
+- **any tile** -- widget type, span, title, one-series vs all-series, and
+  combining it with a second series.
+- **list button** -- browse everything the endpoint exposes; `Show: selected`
+  filters to what is already on screen, which is the view for removing tiles.
+
+A ticked metric infers its format, aggregation and widget from Prometheus
+naming conventions -- counters become rates, `_bytes` becomes IEC, `_seconds`
+becomes a duration, ratios become gauges -- so the common case needs no
+further input.
+
+### Derived tiles
+
+The device polls a raw exposition endpoint, so it cannot evaluate PromQL. For
+the case that actually comes up -- one number from two series -- a tile can
+combine them: `share %` (a/(a+b)), `ratio` (a/b), `a - b`, `a + b`. Both
+operands go through the panel's aggregation first, so on counters this is a
+ratio of RATES, matching what `rate(a)/rate(a+b)` means rather than a lifetime
+average that stops moving.
 
 ## Build and flash
 
