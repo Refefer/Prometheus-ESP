@@ -66,6 +66,7 @@ static int         s_watch_n;
 static SemaphoreHandle_t s_mux;
 static poller_snap_t     s_snap;
 static char              s_url[160];
+static uint32_t          s_cfg_gen;
 static int               s_interval_s = 10;
 
 /*
@@ -649,6 +650,14 @@ static void poller_task(void *arg)
          * burning the failure streak, so a brief outage does not leave the
          * endpoint in a long backoff once the link returns.
          */
+        /* A pushed config lands on the HTTP task; picking it up here means the
+         * watch list is only ever rewritten by the task that reads it. */
+        uint32_t g = config_generation();
+        if (g != s_cfg_gen) {
+            s_cfg_gen = g;
+            poller_reload();
+        }
+
         if (!wifi_mgr_is_connected()) {
             publish(false, "waiting for wi-fi", 0, NULL, 0);
             vTaskDelay(pdMS_TO_TICKS(1000));

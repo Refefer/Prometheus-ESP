@@ -28,5 +28,16 @@ esp_err_t secrets_get_ep_auth(uint16_t ep_id, char *buf, size_t cap);
 esp_err_t secrets_set_ep_auth(uint16_t ep_id, const char *value);
 esp_err_t secrets_del_ep_auth(uint16_t ep_id);
 
+/*
+ * The config-push token.
+ *
+ * Generated on first use and kept in NVS beside the WiFi credentials, so it
+ * never appears in config.json -- which is the file you would paste into an
+ * issue or copy off the device.
+ */
+#define SECRETS_TOKEN_MAX 17          /* 16 hex chars + NUL */
+esp_err_t secrets_get_token(char *buf, size_t cap);
+esp_err_t secrets_new_token(char *buf, size_t cap);
+
 /* Factory reset: wipes the whole namespace. */
 esp_err_t secrets_erase_all(void);

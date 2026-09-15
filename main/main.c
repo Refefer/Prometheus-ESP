@@ -30,6 +30,7 @@
 #include "ui_panelcfg.h"
 #include "ui_endpoints.h"
 #include "ui_setup.h"
+#include "webcfg.h"
 #include "ui_theme.h"
 #include "ui_tile.h"
 #include "ui_widgets.h"
@@ -359,6 +360,40 @@ static void dashboard_tick(lv_timer_t *timer)
      * so a wedged UI task looks identical over serial to a healthy one --
      * data flowing, screen frozen. This distinguishes the two.
      */
+    /* Same pattern as the poller: a pushed config is noticed here rather than
+     * calling into LVGL from the HTTP task. */
+    static uint32_t seen_cfg = 0;
+    uint32_t cfg_gen = config_generation();
+    if (cfg_gen != seen_cfg) {
+        seen_cfg = cfg_gen;
+        build_tiles(lv_scr_act());
+        s_seen_gen = UINT32_MAX;
+        const config_t *c = config_get();
+        label_set_if_changed(s_hdr_title,
+                             (c->n_endpoints && c->endpoints[0].name[0])
+                             ? c->endpoints[0].name : "Prometheus Panel");
+        if (c->n_endpoints) {
+            poller_set_endpoint(c->endpoints[0].url,
+                                c->endpoints[0].poll_s ? c->endpoints[0].poll_s
+                                                       : c->device.poll_default_s);
+        }
+    }
+
+    /*
+     * Repeat the push command until the token has actually been used. The
+     * boot log is gone by the time anyone attaches a console -- the native USB
+     * re-enumerates on reset -- so a one-shot line is a token nobody can read.
+     * It stops the first time a request authenticates.
+     */
+    static int setup_beat;
+    if (webcfg_running() && !webcfg_ever_used() && setup_beat++ % 120 == 0) {
+        char tok[SECRETS_TOKEN_MAX] = "", ip[16] = "";
+        secrets_get_token(tok, sizeof(tok));
+        wifi_mgr_info(ip, sizeof(ip), NULL);
+        ESP_LOGW(TAG, "push config with:  curl -H 'X-Auth: %s' http://%s/config",
+                 tok, ip);
+    }
+
     static int beat;
     if (beat++ % 20 == 0) {
         ESP_LOGI(TAG, "ui alive: tiles=%d seen_gen=%u stack_hw=%u",
@@ -499,6 +534,10 @@ void app_main(void)
         if (url[0] == '\0') {
             ESP_LOGW(TAG, "no endpoint configured; use the gear button");
         }
+    }
+
+    if (secrets_have_wifi() && webcfg_start() != ESP_OK) {
+        ESP_LOGW(TAG, "config endpoint unavailable");
     }
 
     ESP_LOGI(TAG, "boot complete: SRAM %u KB free, PSRAM %u KB free",

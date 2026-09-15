@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include "nvs.h"
+#include "esp_random.h"
 #include "nvs_flash.h"
 
 #include <stdio.h>
@@ -120,6 +121,57 @@ esp_err_t secrets_del_ep_auth(uint16_t ep_id)
     err = nvs_commit(h);
     nvs_close(h);
     return err;
+}
+
+static const char *KEY_TOKEN = "push_token";
+
+esp_err_t secrets_new_token(char *buf, size_t cap)
+{
+    if (cap < SECRETS_TOKEN_MAX) return ESP_ERR_INVALID_SIZE;
+
+    /* esp_random draws from the hardware RNG, which is properly seeded once
+     * the radio is up -- which it is, because a token is only useful to
+     * something that can reach the device over the network. */
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < SECRETS_TOKEN_MAX - 1; i++) {
+        buf[i] = hex[esp_random() & 0x0F];
+    }
+    buf[SECRETS_TOKEN_MAX - 1] = '\0';
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, KEY_TOKEN, buf);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    /*
+     * Logged deliberately.
+     *
+     * The threat this token defends against is something else ON THE LAN
+     * rewriting the dashboard. Reading it requires the USB console, which is
+     * physical access to the device -- the same trust level as reading it off
+     * the screen, and strictly higher than being on the network. Withholding
+     * it here would only mean a device you cannot set up without standing in
+     * front of it, which is the thing the push endpoint exists to avoid.
+     */
+    ESP_LOGW(TAG, "push token: %s", buf);
+    return err;
+}
+
+esp_err_t secrets_get_token(char *buf, size_t cap)
+{
+    if (cap < SECRETS_TOKEN_MAX) return ESP_ERR_INVALID_SIZE;
+    buf[0] = '\0';
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = cap;
+        esp_err_t err = nvs_get_str(h, KEY_TOKEN, buf, &len);
+        nvs_close(h);
+        if (err == ESP_OK && buf[0]) return ESP_OK;
+    }
+    /* First use: mint one rather than leaving the endpoint unprotected. */
+    return secrets_new_token(buf, cap);
 }
 
 esp_err_t secrets_erase_all(void)

@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -22,23 +23,86 @@ static const char *TAG = "config";
 #define PATH_BAK  STORAGE_CFG_PATH "/config.bak"
 
 static config_t    s_cfg;
+static uint32_t    s_generation;
 static bool        s_dirty;
 static bool        s_was_reset;
 static lv_timer_t *s_flush_timer;
 
 /* ------------------------------------------------------------- defaults */
 
-static void set_defaults(void)
+static void set_defaults_into(config_t *cfg)
 {
-    memset(&s_cfg, 0, sizeof(s_cfg));
-    s_cfg.schema  = CFG_SCHEMA_VERSION;
-    s_cfg.next_id = 1;
-    strncpy(s_cfg.device.theme, "night_ops", sizeof(s_cfg.device.theme) - 1);
-    s_cfg.device.poll_default_s = 10;
-    s_cfg.device.rotate_dwell_s = 20;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->schema  = CFG_SCHEMA_VERSION;
+    cfg->next_id = 1;
+    strncpy(cfg->device.theme, "night_ops", sizeof(cfg->device.theme) - 1);
+    cfg->device.poll_default_s = 10;
+    cfg->device.rotate_dwell_s = 20;
 
-    s_cfg.n_screens = 1;
-    strncpy(s_cfg.screens[0].title, "Home", sizeof(s_cfg.screens[0].title) - 1);
+    cfg->n_screens = 1;
+    strncpy(cfg->screens[0].title, "Home", sizeof(cfg->screens[0].title) - 1);
+}
+
+static void set_defaults(void) { set_defaults_into(&s_cfg); }
+
+/* ------------------------------------------------------- names not numbers */
+
+/*
+ * The pushed config is meant to be hand-edited, and "kind": 4 is not
+ * something anyone should have to look up -- getting it wrong silently
+ * produces a plausible tile showing the right number in the wrong units,
+ * which is the worst kind of mistake to debug.
+ *
+ * Names are written; both names and the old integers are read, so a config
+ * saved by an earlier build still loads.
+ */
+typedef struct { int v; const char *name; } enum_name_t;
+
+static const enum_name_t k_kinds[] = {
+    { TILE_STAT, "stat" }, { TILE_SPARK, "sparkline" }, { TILE_CHART, "chart" },
+    { TILE_BAR, "bar" }, { TILE_GAUGE, "gauge" }, { TILE_STATUS, "status" },
+    { TILE_HIST, "histogram" }, { TILE_MULTI, "multi" }, { 0, NULL },
+};
+static const enum_name_t k_fmts[] = {
+    { FMT_AUTO, "auto" }, { FMT_RAW, "raw" }, { FMT_SI, "si" },
+    { FMT_IEC, "bytes" }, { FMT_PCT_01, "percent" },
+    { FMT_PCT_100, "percent100" }, { FMT_DURATION, "duration" },
+    { FMT_RATE_SI, "rate" }, { FMT_RATE_IEC, "rate_bytes" },
+    { FMT_BOOL, "bool" }, { 0, NULL },
+};
+static const enum_name_t k_reduces[] = {
+    { RED_SUM, "sum" }, { RED_AVG, "avg" }, { RED_MIN, "min" },
+    { RED_MAX, "max" }, { RED_COUNT, "count" }, { RED_FIRST, "first" },
+    { 0, NULL },
+};
+static const enum_name_t k_aggs[] = {
+    { AGG_LAST, "last" }, { AGG_RATE, "rate" }, { AGG_DELTA, "delta" },
+    { AGG_AVG, "avg" }, { 0, NULL },
+};
+static const enum_name_t k_ops[] = {
+    { OP_NONE, "none" }, { OP_SHARE, "share" }, { OP_RATIO, "ratio" },
+    { OP_DIFF, "diff" }, { OP_SUM, "sum" }, { 0, NULL },
+};
+
+static const char *enum_to_name(const enum_name_t *tab, int v)
+{
+    for (int i = 0; tab[i].name; i++) if (tab[i].v == v) return tab[i].name;
+    return tab[0].name;
+}
+
+/* Accepts a name or, for configs written by an earlier build, an integer. */
+static int name_to_enum(const cJSON *o, const char *key,
+                        const enum_name_t *tab, int def)
+{
+    const cJSON *v = cJSON_GetObjectItem(o, key);
+    if (cJSON_IsString(v) && v->valuestring) {
+        for (int i = 0; tab[i].name; i++) {
+            if (strcasecmp(tab[i].name, v->valuestring) == 0) return tab[i].v;
+        }
+        return def;
+    }
+    if (cJSON_IsNumber(v)) return (int)v->valuedouble;
+    return def;
 }
 
 /* ------------------------------------------------------------- writing */
@@ -131,13 +195,13 @@ static esp_err_t write_config(const char *path)
         fprintf(f, "    { \"id\": %u, \"ep\": %u, \"sel\": ",
                 (unsigned)p->id, (unsigned)p->ep_id);
         write_escaped(f, p->sel);
-        fprintf(f, ", \"op\": %u", (unsigned)p->op);
+        fputs(", \"op\": ", f); write_escaped(f, enum_to_name(k_ops, p->op));
         fputs(", \"title\": ", f);
         write_escaped(f, p->title);
         fputs(", \"unit\": ", f);
         write_escaped(f, p->unit);
-        fprintf(f, ", \"kind\": %u, \"fmt\": %u", (unsigned)p->kind,
-                (unsigned)p->fmt);
+        fputs(", \"kind\": ", f);  write_escaped(f, enum_to_name(k_kinds, p->kind));
+        fputs(", \"fmt\": ", f);   write_escaped(f, enum_to_name(k_fmts, p->fmt));
 
         fputs(", \"terms\": [", f);
         for (int k = 0; k < p->n_terms; k++) {
@@ -145,9 +209,11 @@ static esp_err_t write_config(const char *path)
             if (k) fputs(", ", f);
             fputs("{ \"sel\": ", f);
             write_escaped(f, tm->sel);
-            fprintf(f, ", \"reduce\": %u, \"agg\": %u, \"window_s\": %u",
-                    (unsigned)tm->reduce, (unsigned)tm->agg,
-                    (unsigned)tm->window_s);
+            fputs(", \"reduce\": ", f);
+            write_escaped(f, enum_to_name(k_reduces, tm->reduce));
+            fputs(", \"agg\": ", f);
+            write_escaped(f, enum_to_name(k_aggs, tm->agg));
+            fprintf(f, ", \"window_s\": %u", (unsigned)tm->window_s);
             fputs(", \"q\": ", f); write_float(f, tm->q);
             fputs(" }", f);
         }
@@ -227,9 +293,12 @@ static void flush_timer_cb(lv_timer_t *t)
     if (s_dirty) config_flush();
 }
 
+uint32_t config_generation(void) { return s_generation; }
+
 void config_touch(void)
 {
     s_dirty = true;
+    s_generation++;
     if (s_flush_timer) lv_timer_reset(s_flush_timer);
 }
 
@@ -262,7 +331,7 @@ static float get_float(const cJSON *o, const char *k)
     return cJSON_IsNumber(v) ? (float)v->valuedouble : NAN;  /* null => unset */
 }
 
-static bool parse_into(const char *json, size_t len)
+static bool parse_into(config_t *cfg, const char *json, size_t len)
 {
     cJSON *root = cJSON_ParseWithLength(json, len);
     if (root == NULL) return false;
@@ -275,25 +344,25 @@ static bool parse_into(const char *json, size_t len)
         return false;
     }
 
-    set_defaults();
-    s_cfg.schema  = (uint16_t)schema;
-    s_cfg.next_id = (uint16_t)get_int(root, "next_id", 1);
+    set_defaults_into(cfg);
+    cfg->schema  = (uint16_t)schema;
+    cfg->next_id = (uint16_t)get_int(root, "next_id", 1);
 
     const cJSON *d = cJSON_GetObjectItem(root, "device");
     if (cJSON_IsObject(d)) {
-        get_str(d, "theme", s_cfg.device.theme, sizeof(s_cfg.device.theme));
-        s_cfg.device.poll_default_s = (uint16_t)get_int(d, "poll_default_s", 10);
-        s_cfg.device.rotate_enabled = get_bool(d, "rotate_enabled", false);
-        s_cfg.device.rotate_dwell_s = (uint16_t)get_int(d, "rotate_dwell_s", 20);
+        get_str(d, "theme", cfg->device.theme, sizeof(cfg->device.theme));
+        cfg->device.poll_default_s = (uint16_t)get_int(d, "poll_default_s", 10);
+        cfg->device.rotate_enabled = get_bool(d, "rotate_enabled", false);
+        cfg->device.rotate_dwell_s = (uint16_t)get_int(d, "rotate_dwell_s", 20);
     }
 
     const cJSON *arr = cJSON_GetObjectItem(root, "endpoints"), *it = NULL;
     if (cJSON_IsArray(arr)) {
         cJSON_ArrayForEach(it, arr) {
-            if (s_cfg.n_endpoints >= CFG_MAX_ENDPOINTS) break;
-            cfg_endpoint_t *e = &s_cfg.endpoints[s_cfg.n_endpoints];
+            if (cfg->n_endpoints >= CFG_MAX_ENDPOINTS) break;
+            cfg_endpoint_t *e = &cfg->endpoints[cfg->n_endpoints];
             memset(e, 0, sizeof(*e));
-            e->id = (uint16_t)get_int(it, "id", s_cfg.next_id++);
+            e->id = (uint16_t)get_int(it, "id", cfg->next_id++);
             get_str(it, "name", e->name, sizeof(e->name));
             char kind[12] = "text";
             get_str(it, "kind", kind, sizeof(kind));
@@ -304,16 +373,16 @@ static bool parse_into(const char *json, size_t len)
             e->auth         = (auth_kind_t)get_int(it, "auth", AUTH_NONE);
             e->insecure_tls = get_bool(it, "insecure_tls", false);
             e->enabled      = get_bool(it, "enabled", true);
-            if (e->url[0]) s_cfg.n_endpoints++;
+            if (e->url[0]) cfg->n_endpoints++;
         }
     }
 
     arr = cJSON_GetObjectItem(root, "screens");
     if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) > 0) {
-        s_cfg.n_screens = 0;
+        cfg->n_screens = 0;
         cJSON_ArrayForEach(it, arr) {
-            if (s_cfg.n_screens >= CFG_MAX_SCREENS) break;
-            cfg_screen_t *sc = &s_cfg.screens[s_cfg.n_screens++];
+            if (cfg->n_screens >= CFG_MAX_SCREENS) break;
+            cfg_screen_t *sc = &cfg->screens[cfg->n_screens++];
             memset(sc, 0, sizeof(*sc));
             get_str(it, "title", sc->title, sizeof(sc->title));
             sc->pinned = get_bool(it, "pinned", false);
@@ -323,17 +392,17 @@ static bool parse_into(const char *json, size_t len)
     arr = cJSON_GetObjectItem(root, "panels");
     if (cJSON_IsArray(arr)) {
         cJSON_ArrayForEach(it, arr) {
-            if (s_cfg.n_panels >= CFG_MAX_PANELS) break;
-            cfg_panel_t *p = &s_cfg.panels[s_cfg.n_panels];
+            if (cfg->n_panels >= CFG_MAX_PANELS) break;
+            cfg_panel_t *p = &cfg->panels[cfg->n_panels];
             memset(p, 0, sizeof(*p));
-            p->id    = (uint16_t)get_int(it, "id", s_cfg.next_id++);
+            p->id    = (uint16_t)get_int(it, "id", cfg->next_id++);
             p->ep_id = (uint16_t)get_int(it, "ep", 0);
             get_str(it, "sel", p->sel, sizeof(p->sel));
-            p->op = (panel_op_t)get_int(it, "op", OP_NONE);
+            p->op = (panel_op_t)name_to_enum(it, "op", k_ops, OP_NONE);
             get_str(it, "title", p->title, sizeof(p->title));
             get_str(it, "unit", p->unit, sizeof(p->unit));
-            p->kind = (tile_kind_t)get_int(it, "kind", TILE_STAT);
-            p->fmt  = (fmt_mode_t)get_int(it, "fmt", FMT_AUTO);
+            p->kind = (tile_kind_t)name_to_enum(it, "kind", k_kinds, TILE_STAT);
+            p->fmt  = (fmt_mode_t)name_to_enum(it, "fmt", k_fmts, FMT_AUTO);
 
             const cJSON *terms = cJSON_GetObjectItem(it, "terms"), *tit = NULL;
             if (cJSON_IsArray(terms) && cJSON_GetArraySize(terms) > 0) {
@@ -342,8 +411,8 @@ static bool parse_into(const char *json, size_t len)
                     cfg_term_t *tm = &p->terms[p->n_terms];
                     memset(tm, 0, sizeof(*tm));
                     get_str(tit, "sel", tm->sel, sizeof(tm->sel));
-                    tm->reduce   = (uint8_t)get_int(tit, "reduce", RED_SUM);
-                    tm->agg      = (uint8_t)get_int(tit, "agg", AGG_LAST);
+                    tm->reduce = (uint8_t)name_to_enum(tit, "reduce", k_reduces, RED_SUM);
+                    tm->agg    = (uint8_t)name_to_enum(tit, "agg", k_aggs, AGG_LAST);
                     tm->window_s = (uint16_t)get_int(tit, "window_s", 0);
                     float tq     = get_float(tit, "q");
                     tm->q        = isnan(tq) ? 0.0f : tq;
@@ -359,7 +428,7 @@ static bool parse_into(const char *json, size_t len)
                 memset(a, 0, sizeof(*a));
                 get_str(it, "sel", a->sel, sizeof(a->sel));
                 a->reduce   = RED_FIRST;   /* what schema 1 actually did */
-                a->agg      = (uint8_t)get_int(it, "agg", AGG_LAST);
+                a->agg      = (uint8_t)name_to_enum(it, "agg", k_aggs, AGG_LAST);
                 a->window_s = (uint16_t)get_int(it, "window_s", 0);
                 float q     = get_float(it, "q");
                 a->q        = isnan(q) ? 0.0f : q;
@@ -387,7 +456,7 @@ static bool parse_into(const char *json, size_t len)
             p->h   = (uint8_t)get_int(it, "h", 1);
             if (p->n_terms > 0) {
                 strncpy(p->sel, p->terms[0].sel, sizeof(p->sel) - 1);
-                s_cfg.n_panels++;
+                cfg->n_panels++;
             }
         }
     }
@@ -412,7 +481,7 @@ static bool load_file(const char *path)
     fclose(f);
     buf[rd] = '\0';
 
-    bool ok = parse_into(buf, rd);
+    bool ok = parse_into(&s_cfg, buf, rd);
     free(buf);
     if (ok) ESP_LOGI(TAG, "loaded %s (%u bytes)", path, (unsigned)rd);
     return ok;
@@ -435,7 +504,18 @@ esp_err_t config_load(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (load_file(PATH_CUR)) return ESP_OK;
+    if (load_file(PATH_CUR)) {
+        if (s_cfg.schema < CFG_SCHEMA_VERSION) {
+            /* Loaded through a migration, so what is on flash is still the old
+             * shape. Rewrite it, or every fetch of /config returns something
+             * that does not match what the device is actually running. */
+            ESP_LOGI(TAG, "migrating stored config from schema %u to %u",
+                     (unsigned)s_cfg.schema, CFG_SCHEMA_VERSION);
+            s_cfg.schema = CFG_SCHEMA_VERSION;
+            config_touch();
+        }
+        return ESP_OK;
+    }
 
     ESP_LOGW(TAG, "%s missing or unreadable, trying the backup", PATH_CUR);
     if (load_file(PATH_BAK)) {
@@ -465,6 +545,78 @@ void config_mark_good_boot(void)
     /* Only after the UI is up and the config has proven loadable, so the
      * backup is a known-good-BOOT config and not merely the previous save. */
     if (write_config(PATH_BAK) == ESP_OK) ESP_LOGD(TAG, "backup refreshed");
+}
+
+/*
+ * Sanity-check a parsed document before it is allowed to replace the live
+ * one. Rejecting with a reason beats accepting something that renders as an
+ * empty screen and leaves the user guessing.
+ */
+static bool validate(const config_t *c, char *err, size_t cap)
+{
+    if (c->schema < 1 || c->schema > CFG_SCHEMA_VERSION) {
+        snprintf(err, cap, "schema %u is not supported (this build reads 1-%u)",
+                 (unsigned)c->schema, CFG_SCHEMA_VERSION);
+        return false;
+    }
+    if (c->n_screens == 0) {
+        snprintf(err, cap, "at least one screen is required");
+        return false;
+    }
+    for (int i = 0; i < c->n_panels; i++) {
+        const cfg_panel_t *p = &c->panels[i];
+        if (p->n_terms == 0 || p->terms[0].sel[0] == '\0') {
+            snprintf(err, cap, "panel %d has no terms", i);
+            return false;
+        }
+        uint8_t w = p->w ? p->w : 1, h = p->h ? p->h : 1;
+        if (p->col + w > GRID_COLS || p->row + h > GRID_ROWS) {
+            snprintf(err, cap,
+                     "panel %d at %ux%u spans past the %dx%d grid",
+                     i, p->col, p->row, GRID_COLS, GRID_ROWS);
+            return false;
+        }
+        if (p->screen >= c->n_screens) {
+            snprintf(err, cap, "panel %d names screen %u, only %u exist",
+                     i, p->screen, c->n_screens);
+            return false;
+        }
+        if (p->op != OP_NONE && p->n_terms < 2) {
+            snprintf(err, cap, "panel %d has an operator but one term", i);
+            return false;
+        }
+    }
+    return true;
+}
+
+esp_err_t config_apply_json(const char *json, size_t len, char *err, size_t cap)
+{
+    if (err && cap) err[0] = '\0';
+
+    /* ~10KB, so the heap rather than whichever stack called us. */
+    config_t *tmp = malloc(sizeof(config_t));
+    if (tmp == NULL) {
+        snprintf(err, cap, "out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (!parse_into(tmp, json, len)) {
+        snprintf(err, cap, "could not parse the document as JSON");
+        free(tmp);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!validate(tmp, err, cap)) {
+        free(tmp);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Whole or not at all. */
+    s_cfg = *tmp;
+    free(tmp);
+
+    config_touch();
+    config_flush();
+    return ESP_OK;
 }
 
 cfg_term_t *config_term0(cfg_panel_t *p)

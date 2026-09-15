@@ -174,6 +174,28 @@ void config_flush(void);
 /* Synchronous variant, for callers that are already off the LVGL task. */
 esp_err_t config_flush_sync(void);
 
+/*
+ * Replace the whole configuration from a JSON document.
+ *
+ * Parsed into a scratch copy and only swapped in if it is whole: a push that
+ * half-applied would leave the panel matching neither the old config nor the
+ * new one, which is worse than rejecting it. On failure nothing changes and
+ * `err` explains why in terms of the document, not of C.
+ *
+ * Safe to call from the HTTP task: it takes no LVGL lock and does not touch
+ * the poller's state directly -- both notice via config_generation().
+ */
+esp_err_t config_apply_json(const char *json, size_t len,
+                            char *err, size_t err_cap);
+
+/*
+ * Bumped whenever the configuration changes from any source. The poller and
+ * the dashboard both poll it rather than being called back, so a push from
+ * the HTTP task never runs UI code or rewrites the watch list underneath the
+ * task that is reading it.
+ */
+uint32_t config_generation(void);
+
 /* True when the last load fell back to defaults. */
 bool config_was_reset(void);
 

@@ -57,6 +57,57 @@ naming conventions -- counters become rates, `_bytes` becomes IEC, `_seconds`
 becomes a duration, ratios become gauges -- so the common case needs no
 further input.
 
+## Pushing configuration
+
+The touch UI is good for adjusting a tile. It is a poor place to express "sum
+the rate over every series whose mode matches `prefill_*`". So the device
+serves the same JSON that lives on its flash:
+
+```sh
+TOK=...                      # printed on the console until it is first used
+D=192.168.1.50
+
+curl -H "X-Auth: $TOK" http://$D/config > panel.json
+$EDITOR panel.json
+curl -X POST -H "X-Auth: $TOK" --data-binary @panel.json http://$D/config
+```
+
+`GET /status` needs no token and carries nothing sensitive -- it is what you
+check when something is wrong.
+
+A panel is a list of **terms** combined by an **op**. Each term selects a SET
+of series (label values may contain `*`) and a **reduce** collapses that set
+to one number. That is the `sum by()` of this format:
+
+```json
+{ "title": "prefix hit rate", "kind": "gauge", "fmt": "percent",
+  "op": "share",
+  "col": 2, "row": 2, "w": 1, "h": 1,
+  "terms": [
+    { "sel": "sglang:realtime_tokens_total{mode=\"prefill_cache\"}",
+      "reduce": "sum", "agg": "rate", "window_s": 60 },
+    { "sel": "sglang:realtime_tokens_total{mode=\"prefill_compute\"}",
+      "reduce": "sum", "agg": "rate", "window_s": 60 }
+  ]
+}
+```
+
+| field | values |
+|---|---|
+| `kind` | stat, sparkline, chart, bar, gauge, status, histogram, multi |
+| `fmt` | auto, raw, si, bytes, percent, percent100, duration, rate, rate_bytes, bool |
+| `reduce` | sum, avg, min, max, count, first |
+| `agg` | last, rate |
+| `op` | none, share (a/(a+b)), ratio (a/b), diff, sum |
+| `window_s` | seconds the rate or quantile covers; 0 = one poll, or all-time for a quantile |
+
+Each term is reduced first and rated second -- `rate(sum(x))`. A push is
+applied whole or rejected with a reason naming the offending panel:
+
+```
+{"error":"panel 0 at 3x2 spans past the 4x3 grid"}
+```
+
 ### Derived tiles
 
 The device polls a raw exposition endpoint, so it cannot evaluate PromQL. For
