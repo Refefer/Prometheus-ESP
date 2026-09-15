@@ -376,6 +376,10 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
         break;
     case PROM_TYPE_COUNTER:
         p->kind = TILE_SPARK;      /* a rate is only meaningful over time */
+        /* Smooth over a minute by default. Exporters that update on a log
+         * interval step rather than flow, and a one-poll rate on those
+         * alternates between zero and a spike. */
+        p->window_s = 60;
         break;
     default:
         p->kind = (fmt == FMT_PCT_01 || fmt == FMT_PCT_100) ? TILE_GAUGE

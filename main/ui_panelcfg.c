@@ -94,14 +94,19 @@ static void refresh(void)
      * making the sheet taller than the screen.
      */
     bool hist = (p->q > 0.0f);
+    /* A windowed rate matters for any counter, not just histograms: an
+     * exporter that updates on a log interval steps rather than flows, and
+     * polled faster than it updates the raw rate alternates between zero and
+     * a spike. */
+    bool windowed = hist || (p->agg == AGG_RATE);
     for (int i = 0; i < 3; i++) hidden_if_changed(s_q_btn[i], !hist);
-    for (int i = 0; i < 4; i++) hidden_if_changed(s_win_btn[i], !hist);
+    for (int i = 0; i < 4; i++) hidden_if_changed(s_win_btn[i], !windowed);
     hidden_if_changed(s_q_cap, !hist);
-    hidden_if_changed(s_win_cap, !hist);
-    for (int i = 0; i < 5; i++) hidden_if_changed(s_op_btn[i], hist);
-    hidden_if_changed(s_op_cap, hist);
-    hidden_if_changed(s_selb_cap, hist);
-    hidden_if_changed(s_selb_btn, hist);
+    hidden_if_changed(s_win_cap, !windowed);
+    for (int i = 0; i < 5; i++) hidden_if_changed(s_op_btn[i], windowed);
+    hidden_if_changed(s_op_cap, windowed);
+    hidden_if_changed(s_selb_cap, windowed);
+    hidden_if_changed(s_selb_btn, windowed);
 
     for (int i = 0; i < 3; i++) {
         bool on = (fabsf(p->q - k_quants[i].q) < 0.001f);

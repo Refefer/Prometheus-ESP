@@ -19,6 +19,11 @@
 
 static const char *TAG = "poller";
 
+/* Enough samples to span the longest offered window at the fastest poll: 15
+ * minutes at 2s would need 450, so the ring is capped and the effective
+ * window is simply as much history as it holds. */
+#define RATE_WIN_MAX 24
+
 /*
  * The watch list, rebuilt from the stored panels.
  *
@@ -52,6 +57,26 @@ typedef struct {
      * 256 bytes instead of kilobytes.
      */
     uint16_t     window_s;
+
+    /*
+     * Sample ring for a windowed rate.
+     *
+     * A counter that only updates on its exporter's log interval steps rather
+     * than flows: polled faster than it updates, most polls see no change and
+     * the rate reads zero, with an occasional spike. Measured on a real
+     * inference server, prompt_tokens_total sat at 0 for four polls then
+     * jumped 97,000 tokens.
+     *
+     * Differencing against the oldest sample still inside the window smooths
+     * across those steps and updates every poll -- which is what rate(x[5m])
+     * means, and why it exists.
+     */
+    double       win_v[RATE_WIN_MAX];
+    int64_t      win_t[RATE_WIN_MAX];
+    uint8_t      win_n, win_head;
+    float        win_last;
+    bool         win_valid;
+
     double       base_cum[PROM_MAX_BUCKETS];
     double       base_le[PROM_MAX_BUCKETS];
     int          base_nb;
@@ -513,6 +538,48 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                     m->n_buckets = (uint8_t)keep;
                     m->has_hist  = true;
                 }
+            }
+        } else if (w->agg == AGG_RATE && w->window_s > 0) {
+            /* Windowed rate: difference against the oldest sample still
+             * inside the window, so a stepped counter reads steadily. */
+            if (!prom_is_num(sc->value)) {
+                w->win_n = 0; w->win_valid = false;
+            } else {
+                double v = sc->value.num;
+
+                /* A counter that went backwards restarted; the ring describes
+                 * a series that no longer exists. */
+                if (w->win_n > 0 &&
+                    v < w->win_v[(w->win_head + RATE_WIN_MAX - 1) % RATE_WIN_MAX]) {
+                    w->win_n = 0; w->win_valid = false;
+                    m->restarted = true;
+                }
+
+                w->win_v[w->win_head] = v;
+                w->win_t[w->win_head] = t;
+                w->win_head = (uint8_t)((w->win_head + 1) % RATE_WIN_MAX);
+                if (w->win_n < RATE_WIN_MAX) w->win_n++;
+
+                int64_t cutoff = t - (int64_t)w->window_s * 1000;
+                int     best = -1;
+                for (int k = 0; k < w->win_n; k++) {
+                    uint8_t idx = (uint8_t)((w->win_head + RATE_WIN_MAX - 1 - k)
+                                            % RATE_WIN_MAX);
+                    best = idx;
+                    if (w->win_t[idx] <= cutoff) break;
+                }
+                if (best >= 0) {
+                    int64_t dt = t - w->win_t[best];
+                    /* Need a real span before the number means anything; below
+                     * that the tile says it is warming rather than showing a
+                     * rate derived from two adjacent samples. */
+                    if (dt >= 2000) {
+                        w->win_last  = (float)((v - w->win_v[best]) * 1000.0 / (double)dt);
+                        w->win_valid = true;
+                    }
+                }
+                if (w->win_valid) shown = w->win_last;
+                else              m->warming = true;
             }
         } else switch (w->agg) {
         case AGG_LAST:
