@@ -337,14 +337,28 @@ static void build_dashboard(void)
     tile_set_tap_handler(tile_tapped);
     build_tiles(scr);
 
-    lv_obj_t *fdiv = make_divider(scr, SCR_W);
-    lv_obj_set_pos(fdiv, 0, FOOTER_Y);
+    /*
+     * A filled strip rather than a rule.
+     *
+     * A 1px line 7px above a 12px label, with 4px of slack below it, reads at
+     * a glance as striking through the text -- and a horizontal line at the
+     * bottom of a screen looks like it is advertising a swipe. Tinting the
+     * strip separates the zone without drawing anything that could be
+     * mistaken for a control.
+     */
+    lv_obj_t *fbar = make_panel(scr);
+    lv_obj_set_size(fbar, SCR_W, FOOTER_H);
+    lv_obj_set_pos(fbar, 0, FOOTER_Y);
+    lv_obj_set_style_bg_color(fbar, COL_PANEL, 0);
+
+    /* Centred in the strip: (26 - 15) / 2 leaves equal air above and below. */
+    const lv_coord_t ftext_y = FOOTER_Y + (FOOTER_H - 15) / 2;
 
     s_ftr_left = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_ftr_left, GRID_MX, FOOTER_Y + 7);
+    lv_obj_set_pos(s_ftr_left, GRID_MX, ftext_y);
 
     s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_ftr_right, SCR_W - 330, FOOTER_Y + 7);
+    lv_obj_set_pos(s_ftr_right, SCR_W - 330, ftext_y);
 }
 
 static void rebuild_dashboard(void)
