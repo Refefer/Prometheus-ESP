@@ -32,6 +32,22 @@
 #define CFG_TITLE_MAX       32
 
 typedef enum { EP_TEXT = 0, EP_PROMAPI } ep_kind_t;
+
+/*
+ * How a panel combines two series into one number.
+ *
+ * Deliberately four fixed shapes rather than an expression language: these
+ * cover hit rates, error rates, shares and headroom, which is essentially
+ * every ratio anyone puts on a panel, and each is one tap to choose rather
+ * than a formula to type on a touchscreen.
+ */
+typedef enum {
+    OP_NONE = 0,   /* single series */
+    OP_SHARE,      /* a / (a+b)  -- cache hit rate, error rate */
+    OP_RATIO,      /* a / b      -- ratio against a total or a capacity */
+    OP_DIFF,       /* a - b      -- headroom */
+    OP_SUM,        /* a + b      -- combined throughput */
+} panel_op_t;
 typedef enum { AUTH_NONE = 0, AUTH_BEARER, AUTH_BASIC } auth_kind_t;
 
 typedef struct {
@@ -50,6 +66,8 @@ typedef struct {
     uint16_t    id;
     uint16_t    ep_id;
     char        sel[CFG_SEL_MAX];    /* name{label="value",...} */
+    char        sel_b[CFG_SEL_MAX];  /* the other operand, when op != OP_NONE */
+    panel_op_t  op;
     char        title[CFG_TITLE_MAX];/* "" => derive from the metric name */
     tile_kind_t kind;
     fmt_mode_t  fmt;

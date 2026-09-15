@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "poller.h"
+#include "ui_browser.h"
 #include "ui_kbd.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
@@ -15,6 +16,7 @@ static lv_obj_t *s_root;
 static lv_obj_t *s_kind_btn[TILE_KIND_COUNT];
 static lv_obj_t *s_size_btn[4];
 static lv_obj_t *s_multi_lbl, *s_sel_lbl, *s_title_lbl;
+static lv_obj_t *s_op_btn[5], *s_selb_lbl;
 static uint16_t  s_id;
 static void (*s_on_close)(void);
 
@@ -22,6 +24,19 @@ static void (*s_on_close)(void);
  * reason, and four choices fit as buttons where six would not. */
 static const struct { uint8_t w, h; const char *name; } k_sizes[4] = {
     { 1, 1, "1x1" }, { 2, 1, "2x1" }, { 1, 2, "1x2" }, { 2, 2, "2x2" },
+};
+
+/*
+ * The four ways two series get combined, named for what they are FOR rather
+ * than for their arithmetic: nobody thinks "a/(a+b)", they think "what share
+ * of the total is this".
+ */
+static const struct { panel_op_t op; const char *name; } k_ops[5] = {
+    { OP_NONE,  "single"  },
+    { OP_SHARE, "share %" },   /* a / (a+b) -- hit rate, error rate */
+    { OP_RATIO, "ratio"   },   /* a / b     -- against a capacity */
+    { OP_DIFF,  "a - b"   },
+    { OP_SUM,   "a + b"   },
 };
 
 static cfg_panel_t *panel(void)
@@ -52,6 +67,20 @@ static void refresh(void)
         lv_obj_t *l = lv_obj_get_child(s_size_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
     }
+
+    for (int i = 0; i < 5; i++) {
+        bool on = (p->op == k_ops[i].op);
+        bg_color_if_changed(s_op_btn[i], on ? COL_ACCENT : COL_PANEL);
+        lv_obj_t *l = lv_obj_get_child(s_op_btn[i], 0);
+        if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
+    }
+    label_set_if_changed(s_selb_lbl,
+                         p->op == OP_NONE ? "(not used)"
+                         : p->sel_b[0]    ? p->sel_b
+                                          : "tap to choose the other series");
+    text_color_if_changed(s_selb_lbl,
+                          (p->op != OP_NONE && !p->sel_b[0]) ? COL_WARN
+                                                             : COL_TEXT);
 
     label_set_if_changed(s_multi_lbl, p->multi ? "all series" : "one series");
     label_set_if_changed(s_title_lbl, p->title[0] ? p->title : "(metric name)");
@@ -125,6 +154,50 @@ static void multi_cb(lv_event_t *e)
         if (p->h < vt->min_h) p->h = vt->min_h;
         config_place_panel(p);
     }
+    config_touch();
+    refresh();
+}
+
+static void selb_chosen(const char *sel)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL || sel == NULL) { refresh(); return; }
+    strncpy(p->sel_b, sel, sizeof(p->sel_b) - 1);
+    p->sel_b[sizeof(p->sel_b) - 1] = '\0';
+    config_touch();
+    refresh();
+}
+
+static void selb_cb(lv_event_t *e)
+{
+    (void)e;
+    cfg_panel_t *p = panel();
+    if (p == NULL || p->op == OP_NONE) {
+        ui_toast("Choose a comparison first", SEV_WARN, 2000);
+        return;
+    }
+    ui_browser_open_select(selb_chosen);
+}
+
+static void op_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    p->op = k_ops[i].op;
+
+    /*
+     * A share is a proportion, so default it to a percentage gauge -- that is
+     * what the number means, and leaving it as raw SI would show 0.972 where
+     * the reader wants 97%.
+     */
+    if (p->op == OP_SHARE) {
+        p->fmt  = FMT_PCT_01;
+        p->vmin = 0.0f;
+        p->vmax = 100.0f;
+        if (p->kind == TILE_STAT) p->kind = TILE_GAUGE;
+    }
+    if (p->op != OP_NONE) p->multi = false;   /* the two are incompatible */
     config_touch();
     refresh();
 }
@@ -235,22 +308,42 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     /* series mode */
     lv_obj_t *mc = make_label(s_root, FONT_S, COL_DIM);
     lv_label_set_text(mc, "Series");
-    lv_obj_set_pos(mc, GRID_MX + 420, y + 60);
+    lv_obj_set_pos(mc, GRID_MX + 400, y + 60);
     lv_obj_t *mbtn = make_btn(s_root, "", multi_cb, NULL);
-    lv_obj_set_size(mbtn, 200, 42);
-    lv_obj_set_pos(mbtn, GRID_MX + 420, y + 82);
+    lv_obj_set_size(mbtn, 170, 42);
+    lv_obj_set_pos(mbtn, GRID_MX + 400, y + 82);
     s_multi_lbl = lv_obj_get_child(mbtn, 0);
 
     /* title */
     lv_obj_t *tc = make_label(s_root, FONT_S, COL_DIM);
     lv_label_set_text(tc, "Title");
-    lv_obj_set_pos(tc, GRID_MX, y + 140);
+    lv_obj_set_pos(tc, GRID_MX + 580, y + 60);
     lv_obj_t *tbtn = make_btn(s_root, "", title_cb, NULL);
-    lv_obj_set_size(tbtn, 400, 42);
-    lv_obj_set_pos(tbtn, GRID_MX, y + 162);
+    lv_obj_set_size(tbtn, 190, 42);
+    lv_obj_set_pos(tbtn, GRID_MX + 580, y + 82);
     s_title_lbl = lv_obj_get_child(tbtn, 0);
     lv_label_set_long_mode(s_title_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_title_lbl, 370);
+    lv_obj_set_width(s_title_lbl, 160);
+
+    /* combine with a second series */
+    lv_obj_t *oc = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(oc, "Combine");
+    lv_obj_set_pos(oc, GRID_MX, y + 140);
+    for (int i = 0; i < 5; i++) {
+        s_op_btn[i] = make_btn(s_root, k_ops[i].name, op_cb, (void *)(intptr_t)i);
+        lv_obj_set_size(s_op_btn[i], 92, 42);
+        lv_obj_set_pos(s_op_btn[i], GRID_MX + i * 98, y + 162);
+    }
+
+    lv_obj_t *bc = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(bc, "with");
+    lv_obj_set_pos(bc, GRID_MX + 500, y + 140);
+    lv_obj_t *bbtn = make_btn(s_root, "", selb_cb, NULL);
+    lv_obj_set_size(bbtn, 270, 42);
+    lv_obj_set_pos(bbtn, GRID_MX + 500, y + 162);
+    s_selb_lbl = lv_obj_get_child(bbtn, 0);
+    lv_label_set_long_mode(s_selb_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_selb_lbl, 240);
 
     lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove tile",
                             remove_cb, NULL);

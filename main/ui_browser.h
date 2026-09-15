@@ -24,4 +24,10 @@ void ui_browser_open(void (*on_close)(void));
 void ui_browser_open_pick(uint8_t col, uint8_t row,
                           void (*on_pick)(uint16_t panel_id));
 
+/*
+ * Select-a-selector: returns a series' selector without creating anything.
+ * Used to choose the second operand of a derived panel. NULL means cancelled.
+ */
+void ui_browser_open_select(void (*on_select)(const char *sel));
+
 bool ui_browser_is_open(void);

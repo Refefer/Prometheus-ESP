@@ -42,6 +42,16 @@ typedef struct {
 
     bool         multi;
 
+    /* Second operand for a derived panel. Its own scratch, because
+     * prom_parse_selector unescapes in place and the label pointers alias it. */
+    panel_op_t   op;
+    char         scratch_b[CFG_SEL_MAX];
+    const char  *name_b;
+    uint16_t     name_b_len;
+    prom_label_t labels_b[8];
+    uint8_t      n_labels_b;
+    rate_state_t rate_b;
+
     rate_state_t rate;
     fmt_state_t  fmt_state;
 
@@ -57,6 +67,8 @@ typedef struct {
 /* Per-scrape accumulation. */
 typedef struct {
     bool   seen;
+    bool   seen_b;
+    prom_value_t value_b;
     prom_value_t value;
     int    nb;
     double le[PROM_MAX_BUCKETS];
@@ -100,22 +112,26 @@ static void  psram_free(void *p)   { heap_caps_free(p); }
 /* Every label on the watch must be present on the sample with the same value.
  * Extra labels on the sample are fine -- a selector is a filter, not an
  * exact-match requirement. */
-static bool labels_match(const prom_sample_t *s, const watch_rt_t *w)
+static bool labels_match_n(const prom_sample_t *s, const prom_label_t *want,
+                           uint8_t n)
 {
-    for (uint8_t i = 0; i < w->n_labels; i++) {
+    for (uint8_t i = 0; i < n; i++) {
         bool found = false;
         for (uint8_t j = 0; j < s->n_labels; j++) {
-            if (s->labels[j].key_len != w->labels[i].key_len) continue;
-            if (memcmp(s->labels[j].key, w->labels[i].key,
-                       w->labels[i].key_len) != 0) continue;
-            found = (s->labels[j].val_len == w->labels[i].val_len) &&
-                    memcmp(s->labels[j].val, w->labels[i].val,
-                           w->labels[i].val_len) == 0;
+            if (s->labels[j].key_len != want[i].key_len) continue;
+            if (memcmp(s->labels[j].key, want[i].key, want[i].key_len) != 0) continue;
+            found = (s->labels[j].val_len == want[i].val_len) &&
+                    memcmp(s->labels[j].val, want[i].val, want[i].val_len) == 0;
             break;
         }
         if (!found) return false;
     }
     return true;
+}
+
+static bool labels_match(const prom_sample_t *s, const watch_rt_t *w)
+{
+    return labels_match_n(s, w->labels, w->n_labels);
 }
 
 /*
@@ -198,6 +214,16 @@ static bool on_sample(void *ctx, const prom_sample_t *s)
             continue;
         }
 
+        /* The second operand is matched independently, so the two sides can
+         * be different label sets of the same metric or different metrics
+         * entirely. */
+        if (w->op != OP_NONE && w->name_b != NULL &&
+            name_is(s, w->name_b, w->name_b_len) &&
+            labels_match_n(s, w->labels_b, w->n_labels_b)) {
+            s_scratch[i].value_b = s->value;
+            s_scratch[i].seen_b  = true;
+        }
+
         if (!name_is(s, w->name, w->name_len) || !labels_match(s, w)) continue;
 
         if (w->multi) {
@@ -271,7 +297,49 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
         double shown = NAN;
 
-        if (w->multi) {
+        if (w->op != OP_NONE) {
+            /*
+             * Both operands go through the panel's aggregation before being
+             * combined. For counters that means ratio-of-rates, not
+             * ratio-of-totals -- a windowed hit rate rather than a lifetime
+             * one, which is what rate(a)/rate(a+b) means in PromQL and what
+             * anyone watching a panel actually wants.
+             */
+            double a = NAN, b = NAN;
+            if (w->agg == AGG_RATE) {
+                float ra = 0, rb = 0;
+                int64_t gap = (int64_t)s_interval_s * 3000;
+                if (sc->seen &&
+                    prom_rate_step(&w->rate, sc->value, t, gap, &ra) == RATE_OK) {
+                    a = ra;
+                }
+                if (sc->seen_b &&
+                    prom_rate_step(&w->rate_b, sc->value_b, t, gap, &rb) == RATE_OK) {
+                    b = rb;
+                }
+                if (!isfinite(a) || !isfinite(b)) m->warming = true;
+            } else {
+                if (sc->seen   && prom_is_num(sc->value))   a = sc->value.num;
+                if (sc->seen_b && prom_is_num(sc->value_b)) b = sc->value_b.num;
+            }
+
+            if (isfinite(a) && isfinite(b)) {
+                switch (w->op) {
+                case OP_SHARE: {
+                    double d = a + b;
+                    /* Both idle is not 0% -- it is "nothing happened", and a
+                     * hit rate that reads 0 when the server is quiet would be
+                     * read as a fault. */
+                    shown = (d != 0.0) ? a / d : NAN;
+                    break;
+                }
+                case OP_RATIO: shown = (b != 0.0) ? a / b : NAN; break;
+                case OP_DIFF:  shown = a - b; break;
+                case OP_SUM:   shown = a + b; break;
+                default:       shown = a;     break;
+                }
+            }
+        } else if (w->multi) {
             /* Per-child baselines are keyed by label so a series appearing or
              * disappearing between scrapes does not shift everyone else's
              * rate onto the wrong history. */
@@ -660,13 +728,14 @@ void poller_reload(void)
      * when a selection changes. Both overflow. The baselines are 32 bytes an
      * entry.
      */
-    struct { uint16_t id; rate_state_t rate; fmt_state_t fmt; }
+    struct { uint16_t id; rate_state_t rate, rate_b; fmt_state_t fmt; }
         prev[POLLER_MAX_WATCH];
     int prev_n = s_watch_n;
     for (int i = 0; i < prev_n; i++) {
-        prev[i].id   = s_watch[i].panel_id;
-        prev[i].rate = s_watch[i].rate;
-        prev[i].fmt  = s_watch[i].fmt_state;
+        prev[i].id     = s_watch[i].panel_id;
+        prev[i].rate   = s_watch[i].rate;
+        prev[i].rate_b = s_watch[i].rate_b;
+        prev[i].fmt    = s_watch[i].fmt_state;
     }
 
     memset(s_watch, 0, sizeof(s_watch));
@@ -686,6 +755,19 @@ void poller_reload(void)
         w->fmt      = p->fmt;
         w->q        = p->q;
         w->multi    = p->multi;
+        w->op       = p->op;
+        if (w->op != OP_NONE && p->sel_b[0]) {
+            strncpy(w->scratch_b, p->sel_b, sizeof(w->scratch_b) - 1);
+            if (!prom_parse_selector(w->scratch_b, w->scratch_b,
+                                     sizeof(w->scratch_b),
+                                     &w->name_b, &w->name_b_len,
+                                     w->labels_b, 8, &w->n_labels_b)) {
+                ESP_LOGW(TAG, "unparseable second operand: %s", p->sel_b);
+                w->op = OP_NONE;
+            }
+        } else if (w->op != OP_NONE) {
+            w->op = OP_NONE;      /* an operator with nothing to operate on */
+        }
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
         strncpy(w->scratch, p->sel, sizeof(w->scratch) - 1);
 
@@ -710,6 +792,7 @@ void poller_reload(void)
         for (int j = 0; j < prev_n; j++) {
             if (prev[j].id == w->panel_id) {
                 w->rate      = prev[j].rate;
+                w->rate_b    = prev[j].rate_b;
                 w->fmt_state = prev[j].fmt;
                 break;
             }

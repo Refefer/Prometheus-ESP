@@ -88,6 +88,8 @@ static bool     s_pick_mode;
 static bool     s_picked;
 static uint8_t  s_pick_col, s_pick_row;
 static void   (*s_on_pick)(uint16_t panel_id);
+static bool     s_select_mode;
+static void   (*s_on_select)(const char *sel);
 
 static void refilter(void);
 static void render_rows(void);
@@ -444,6 +446,22 @@ static void row_cb(lv_event_t *e)
     int idx  = s_page * ROWS_VISIBLE + slot;
     if (idx >= s_filt_n) return;
 
+    /* Select mode returns a selector and creates nothing. */
+    if (s_select_mode) {
+        const char *sel = (s_level == 1) ? s_ser[s_filt[idx]].sel
+                                         : (s_cat[s_filt[idx]].sel[0]
+                                            ? s_cat[s_filt[idx]].sel
+                                            : s_cat[s_filt[idx]].name);
+        char copy[CFG_SEL_MAX];
+        strncpy(copy, sel, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        void (*cb)(const char *) = s_on_select;
+        s_picked = true;
+        close_cb(NULL);
+        if (cb) cb(copy);
+        return;
+    }
+
     if (s_level == 1) {
         const ser_entry_t *se = &s_ser[s_filt[idx]];
         cat_entry_t *parent = &s_cat[s_drill];
@@ -707,6 +725,14 @@ static void close_cb(lv_event_t *e)
     if (s_ser) { heap_caps_free(s_ser); s_ser = NULL; s_ser_n = 0; }
     s_level = 0; s_drill = -1;
 
+    if (s_select_mode) {
+        s_select_mode = false;
+        void (*cb)(const char *) = s_on_select;
+        s_on_select = NULL;
+        if (cb && !s_picked) cb(NULL);
+        s_picked = false;
+        return;
+    }
     if (s_pick_mode) {
         s_pick_mode = false;
         /* In pick mode the caller is notified by row_cb, not here; reaching
@@ -729,8 +755,9 @@ void ui_browser_open_pick(uint8_t col, uint8_t row,
                           void (*on_pick)(uint16_t panel_id))
 {
     if (s_root) return;
-    s_pick_mode = true;
-    s_picked    = false;
+    s_pick_mode   = true;
+    s_select_mode = false;
+    s_picked      = false;
     s_pick_col  = col;
     s_pick_row  = row;
     s_on_pick   = on_pick;
@@ -738,10 +765,22 @@ void ui_browser_open_pick(uint8_t col, uint8_t row,
     browser_build("Pick a metric");
 }
 
+void ui_browser_open_select(void (*on_select)(const char *sel))
+{
+    if (s_root) return;
+    s_pick_mode   = false;
+    s_select_mode = true;
+    s_picked      = false;
+    s_on_select   = on_select;
+    s_on_close    = NULL;
+    browser_build("Pick the other series");
+}
+
 void ui_browser_open(void (*on_close)(void))
 {
     if (s_root) return;
-    s_pick_mode = false;
+    s_pick_mode   = false;
+    s_select_mode = false;
     s_on_close = on_close;
     browser_build("Metrics");
 }
@@ -786,8 +825,9 @@ static void browser_build(const char *heading)
     lv_obj_set_pos(s_count, 430, 14);
 
     lv_obj_t *done = make_btn_accent(s_root,
-                                     s_pick_mode ? LV_SYMBOL_CLOSE "  Cancel"
-                                                 : LV_SYMBOL_OK "  Done",
+                                     (s_pick_mode || s_select_mode)
+                                         ? LV_SYMBOL_CLOSE "  Cancel"
+                                         : LV_SYMBOL_OK "  Done",
                                      close_cb, NULL);
     lv_obj_set_size(done, 130, 34);
     lv_obj_set_pos(done, SCR_W - 130 - GRID_MX, 6);

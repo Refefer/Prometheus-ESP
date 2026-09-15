@@ -131,6 +131,9 @@ static esp_err_t write_config(const char *path)
         fprintf(f, "    { \"id\": %u, \"ep\": %u, \"sel\": ",
                 (unsigned)p->id, (unsigned)p->ep_id);
         write_escaped(f, p->sel);
+        fputs(", \"sel_b\": ", f);
+        write_escaped(f, p->sel_b);
+        fprintf(f, ", \"op\": %u", (unsigned)p->op);
         fputs(", \"title\": ", f);
         write_escaped(f, p->title);
         fputs(", \"unit\": ", f);
@@ -315,6 +318,8 @@ static bool parse_into(const char *json, size_t len)
             p->id    = (uint16_t)get_int(it, "id", s_cfg.next_id++);
             p->ep_id = (uint16_t)get_int(it, "ep", 0);
             get_str(it, "sel", p->sel, sizeof(p->sel));
+            get_str(it, "sel_b", p->sel_b, sizeof(p->sel_b));
+            p->op = (panel_op_t)get_int(it, "op", OP_NONE);
             get_str(it, "title", p->title, sizeof(p->title));
             get_str(it, "unit", p->unit, sizeof(p->unit));
             p->kind = (tile_kind_t)get_int(it, "kind", TILE_STAT);
