@@ -28,9 +28,14 @@ static const char *TAG = "browser";
  * this screen opens and freed when it closes, so its footprint is a transient
  * peak rather than a steady-state cost.
  */
-#define CAT_MAX_NAMES 512
-#define CAT_NAME_MAX  112
-#define ROWS_VISIBLE    8
+#define CAT_MAX_NAMES  384
+#define CAT_NAME_MAX   112
+#define ROWS_VISIBLE     8
+/* Series kept per metric name, and in total. A family with more than this is
+ * shown truncated -- past a couple of dozen label sets the useful tool is a
+ * multi-series tile or a PromQL aggregation, not a longer list. */
+#define CAT_MAX_SER_PER  24
+#define CAT_MAX_SERIES  768
 
 typedef struct {
     char        name[CAT_NAME_MAX];
@@ -39,11 +44,30 @@ typedef struct {
     double      value;               /* first sample seen, for the preview */
     bool        has_value;
     char        sel[CFG_SEL_MAX];    /* first series, as a selector */
+    uint16_t    ser[CAT_MAX_SER_PER];/* indices into the series pool */
+    uint8_t     n_ser;
+    bool        ser_truncated;
 } cat_entry_t;
 
-static cat_entry_t *s_cat;
-static int          s_cat_n;
+/* One entry per distinct label set. Buckets and quantiles collapse into their
+ * parent series here, because the parser already strips le and quantile from
+ * the label set -- so a 19-bucket histogram is one series, not nineteen. */
+typedef struct {
+    char   sel[CFG_SEL_MAX];         /* full selector, what a panel binds to */
+    char   labels[72];               /* the distinguishing part, for display */
+    float  value;
+    bool   has_value;
+} ser_entry_t;
+
+static cat_entry_t  *s_cat;
+static int           s_cat_n;
+static ser_entry_t  *s_ser;
+static int           s_ser_n;
 static volatile bool s_scanning;
+
+/* Level 0 lists names; level 1 lists one name's label sets. */
+static int s_level;
+static int s_drill = -1;
 
 /* Filtered view into the catalog. */
 static uint16_t s_filt[CAT_MAX_NAMES];
@@ -55,7 +79,8 @@ static bool     s_selected_only;
 static lv_obj_t *s_root, *s_status, *s_count, *s_search_btn, *s_page_lbl;
 static lv_obj_t *s_row[ROWS_VISIBLE], *s_row_tick[ROWS_VISIBLE];
 static lv_obj_t *s_row_name[ROWS_VISIBLE], *s_row_type[ROWS_VISIBLE];
-static lv_obj_t *s_row_val[ROWS_VISIBLE];
+static lv_obj_t *s_row_val[ROWS_VISIBLE], *s_row_more[ROWS_VISIBLE];
+static lv_obj_t *s_back_btn;
 static void (*s_on_close)(void);
 
 /* Pick-one mode: the cell the new tile should occupy. */
@@ -101,6 +126,24 @@ static cat_entry_t *cat_find_or_add(const char *name, size_t len)
     return e;
 }
 
+/* Just the labels, for the level-1 rows: the metric name is in the header and
+ * repeating it on every row wastes the width that distinguishes them. */
+static void render_labels(const prom_sample_t *s, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = '\0';
+    for (uint8_t i = 0; i < s->n_labels && o + 2 < cap; i++) {
+        if (o > 0) { out[o++] = ' '; if (o + 1 >= cap) break; }
+        size_t kn = s->labels[i].key_len, vn = s->labels[i].val_len;
+        if (o + kn + vn + 2 >= cap) break;
+        memcpy(out + o, s->labels[i].key, kn); o += kn;
+        out[o++] = '=';
+        memcpy(out + o, s->labels[i].val, vn); o += vn;
+    }
+    out[o] = '\0';
+    if (out[0] == '\0') strncpy(out, "(no labels)", cap - 1);
+}
+
 static bool discover_sample(void *ctx, const prom_sample_t *s)
 {
     (void)ctx;
@@ -110,15 +153,48 @@ static bool discover_sample(void *ctx, const prom_sample_t *s)
     if (e == NULL) return true;
 
     if (s->type != PROM_TYPE_UNTYPED) e->type = s->type;
-    if (e->series < 0xFFFF) e->series++;
+
+    char sel[CFG_SEL_MAX];
+    if (prom_render(sel, sizeof(sel), s->base_name, s->base_len,
+                    s->labels, s->n_labels) == 0) {
+        return true;
+    }
+
+    /*
+     * Distinct LABEL SETS, not samples. The parser strips le and quantile
+     * from the label set, so every bucket of a histogram renders to the same
+     * selector and collapses to one series here -- which is what a person
+     * means by "how many series does this metric have".
+     */
+    int found = -1;
+    for (int i = 0; i < e->n_ser; i++) {
+        if (strcmp(s_ser[e->ser[i]].sel, sel) == 0) { found = i; break; }
+    }
+
+    if (found < 0) {
+        if (e->n_ser >= CAT_MAX_SER_PER || s_ser_n >= CAT_MAX_SERIES) {
+            e->ser_truncated = true;
+        } else {
+            ser_entry_t *se = &s_ser[s_ser_n];
+            memset(se, 0, sizeof(*se));
+            strncpy(se->sel, sel, sizeof(se->sel) - 1);
+            render_labels(s, se->labels, sizeof(se->labels));
+            if (prom_is_num(s->value)) {
+                se->value = (float)s->value.num;
+                se->has_value = true;
+            }
+            e->ser[e->n_ser++] = (uint16_t)s_ser_n++;
+            if (e->series < 0xFFFF) e->series++;
+            found = e->n_ser - 1;
+        }
+    }
 
     if (!e->has_value && prom_is_num(s->value)) {
         e->value = s->value.num;
         e->has_value = true;
-        /* Remember the first series verbatim so ticking the name has a
-         * concrete selector to bind to. */
-        prom_render(e->sel, sizeof(e->sel), s->base_name, s->base_len,
-                    s->labels, s->n_labels);
+        /* The first series verbatim, so ticking the NAME still has a concrete
+         * selector to bind to. */
+        strncpy(e->sel, sel, sizeof(e->sel) - 1);
     }
     return true;
 }
@@ -201,11 +277,25 @@ static uint16_t ep_id(void)
 static void refilter(void)
 {
     s_filt_n = 0;
-    for (int i = 0; i < s_cat_n; i++) {
-        if (!contains_ci(s_cat[i].name, s_query)) continue;
-        if (s_selected_only && !config_has_panel(ep_id(), s_cat[i].sel)) continue;
-        s_filt[s_filt_n++] = (uint16_t)i;
+
+    if (s_level == 1 && s_drill >= 0 && s_drill < s_cat_n) {
+        /* Level 1 lists one name's label sets. Search applies to the labels,
+         * which is how you find cpu="3" among sixteen. */
+        const cat_entry_t *e = &s_cat[s_drill];
+        for (int i = 0; i < e->n_ser; i++) {
+            const ser_entry_t *se = &s_ser[e->ser[i]];
+            if (!contains_ci(se->labels, s_query)) continue;
+            if (s_selected_only && !config_has_panel(ep_id(), se->sel)) continue;
+            s_filt[s_filt_n++] = e->ser[i];
+        }
+    } else {
+        for (int i = 0; i < s_cat_n; i++) {
+            if (!contains_ci(s_cat[i].name, s_query)) continue;
+            if (s_selected_only && !config_has_panel(ep_id(), s_cat[i].sel)) continue;
+            s_filt[s_filt_n++] = (uint16_t)i;
+        }
     }
+
     int pages = (s_filt_n + ROWS_VISIBLE - 1) / ROWS_VISIBLE;
     if (s_page >= pages) s_page = pages > 0 ? pages - 1 : 0;
 }
@@ -336,10 +426,9 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
     return p->id;
 }
 
-static void remove_panel_for(const cat_entry_t *e)
+static void remove_panel_sel(const char *sel)
 {
     const config_t *c = config_get();
-    const char *sel = e->sel[0] ? e->sel : e->name;
     for (int i = 0; i < c->n_panels; i++) {
         if (c->panels[i].ep_id == ep_id() &&
             strcmp(c->panels[i].sel, sel) == 0) {
@@ -354,6 +443,38 @@ static void row_cb(lv_event_t *e)
     int slot = (int)(intptr_t)lv_event_get_user_data(e);
     int idx  = s_page * ROWS_VISIBLE + slot;
     if (idx >= s_filt_n) return;
+
+    if (s_level == 1) {
+        const ser_entry_t *se = &s_ser[s_filt[idx]];
+        cat_entry_t *parent = &s_cat[s_drill];
+
+        if (s_pick_mode) {
+            /* Bind the panel to this exact label set rather than the family's
+             * first one. */
+            cat_entry_t one = *parent;
+            strncpy(one.sel, se->sel, sizeof(one.sel) - 1);
+            one.value = se->value;
+            one.has_value = se->has_value;
+            uint16_t id = add_panel_for(&one, true, s_pick_col, s_pick_row);
+            void (*cb)(uint16_t) = s_on_pick;
+            s_picked = true;
+            close_cb(NULL);
+            if (cb) cb(id);
+            return;
+        }
+
+        if (config_has_panel(ep_id(), se->sel)) {
+            remove_panel_sel(se->sel);
+        } else {
+            cat_entry_t one = *parent;
+            strncpy(one.sel, se->sel, sizeof(one.sel) - 1);
+            one.value = se->value;
+            one.has_value = se->has_value;
+            add_panel_for(&one, false, 0, 0);
+        }
+        render_rows();
+        return;
+    }
 
     cat_entry_t *ce = &s_cat[s_filt[idx]];
 
@@ -370,8 +491,37 @@ static void row_cb(lv_event_t *e)
     }
 
     const char *sel = ce->sel[0] ? ce->sel : ce->name;
-    if (config_has_panel(ep_id(), sel)) remove_panel_for(ce);
+    if (config_has_panel(ep_id(), sel)) remove_panel_sel(sel);
     else                                add_panel_for(ce, false, 0, 0);
+    render_rows();
+}
+
+static void drill_cb(lv_event_t *e)
+{
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    int idx  = s_page * ROWS_VISIBLE + slot;
+    if (s_level != 0 || idx >= s_filt_n) return;
+
+    s_drill = s_filt[idx];
+    s_level = 1;
+    s_page  = 0;
+    s_query[0] = '\0';
+    lv_obj_t *l = lv_obj_get_child(s_search_btn, 0);
+    if (l) label_set_if_changed(l, "search...");
+    refilter();
+    render_rows();
+}
+
+static void back_cb(lv_event_t *e)
+{
+    (void)e;
+    s_level = 0;
+    s_drill = -1;
+    s_page  = 0;
+    s_query[0] = '\0';
+    lv_obj_t *l = lv_obj_get_child(s_search_btn, 0);
+    if (l) label_set_if_changed(l, "search...");
+    refilter();
     render_rows();
 }
 
@@ -394,35 +544,63 @@ static void render_rows(void)
     const config_t *c = config_get();
     for (int i = 0; i < c->n_panels; i++) if (c->panels[i].sel[0]) sel_total++;
 
+    bool drilled = (s_level == 1 && s_drill >= 0 && s_drill < s_cat_n);
+    hidden_if_changed(s_back_btn, !drilled);
+
     for (int r = 0; r < ROWS_VISIBLE; r++) {
         int idx = s_page * ROWS_VISIBLE + r;
         if (idx >= s_filt_n) { hidden_if_changed(s_row[r], true); continue; }
         hidden_if_changed(s_row[r], false);
 
-        cat_entry_t *e = &s_cat[s_filt[idx]];
-        const char *sel = e->sel[0] ? e->sel : e->name;
-        bool on = config_has_panel(ep_id(), sel);
+        const char *sel, *primary, *secondary = "";
+        bool has_value; float value;
+        bool can_drill = false;
+        char sec[40];
 
+        if (drilled) {
+            const ser_entry_t *se = &s_ser[s_filt[idx]];
+            sel = se->sel;
+            primary = se->labels;
+            has_value = se->has_value;
+            value = se->value;
+        } else {
+            const cat_entry_t *e = &s_cat[s_filt[idx]];
+            sel = e->sel[0] ? e->sel : e->name;
+            primary = e->name;
+            has_value = e->has_value;
+            value = (float)e->value;
+            snprintf(sec, sizeof(sec), "%s  x%u%s", type_badge(e->type),
+                     (unsigned)e->series, e->ser_truncated ? "+" : "");
+            secondary = sec;
+            /* Only offer the drill-down where there is something to drill
+             * into: a chevron on a single-series metric is a dead end. */
+            can_drill = (e->n_ser > 1);
+        }
+
+        bool on = config_has_panel(ep_id(), sel);
         label_set_if_changed(s_row_tick[r], on ? LV_SYMBOL_OK : "");
         text_color_if_changed(s_row_tick[r], on ? COL_ACCENT : COL_DIM);
-        label_set_if_changed(s_row_name[r], e->name);
+        label_set_if_changed(s_row_name[r], primary);
         text_color_if_changed(s_row_name[r], on ? COL_TEXT : COL_DIM);
+        label_set_if_changed(s_row_type[r], secondary);
 
-        label_set_fmt_if_changed(s_row_type[r], "%s  x%u",
-                                 type_badge(e->type), (unsigned)e->series);
+        hidden_if_changed(s_row_more[r], !can_drill);
 
-        if (e->has_value) {
+        if (has_value) {
             fmt_mode_t fmt = FMT_SI; agg_mode_t agg; char unit[8];
-            ui_fmt_infer(e->name, strlen(e->name), (int)e->type,
-                         &fmt, unit, sizeof(unit), &agg);
+            const char *nm = drilled ? s_cat[s_drill].name
+                                     : s_cat[s_filt[idx]].name;
+            prom_type_t ty = drilled ? s_cat[s_drill].type
+                                     : s_cat[s_filt[idx]].type;
+            ui_fmt_infer(nm, strlen(nm), (int)ty, &fmt, unit, sizeof(unit), &agg);
             char buf[32];
             /* The preview shows the RAW sample, so a counter reads as its
              * total here even though its tile will show a rate. Formatting it
              * as a rate would be a lie: there is only one sample. */
-            ui_fmt_join(e->value, (fmt == FMT_RATE_SI)  ? FMT_SI
-                                : (fmt == FMT_RATE_IEC) ? FMT_IEC
-                                : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
-                                : fmt,
+            ui_fmt_join(value, (fmt == FMT_RATE_SI)  ? FMT_SI
+                             : (fmt == FMT_RATE_IEC) ? FMT_IEC
+                             : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
+                             : fmt,
                         unit, buf, sizeof(buf));
             label_set_if_changed(s_row_val[r], buf);
         } else {
@@ -433,12 +611,16 @@ static void render_rows(void)
     int pages = (s_filt_n + ROWS_VISIBLE - 1) / ROWS_VISIBLE;
     label_set_fmt_if_changed(s_page_lbl, "page %d / %d",
                              pages ? s_page + 1 : 0, pages);
+
     int used = cells_used();
     int total = GRID_COLS * GRID_ROWS;
-    label_set_fmt_if_changed(s_count, "%d shown   %d selected   %d/%d cells",
-                             s_filt_n, sel_total, used, total);
-    /* Amber once the screen is nearly full, so "why did nothing happen?"
-     * becomes "ah, it is full" before the refusal rather than after. */
+    if (drilled) {
+        label_set_fmt_if_changed(s_count, "%.40s   %d series   %d/%d cells",
+                                 s_cat[s_drill].name, s_filt_n, used, total);
+    } else {
+        label_set_fmt_if_changed(s_count, "%d shown   %d selected   %d/%d cells",
+                                 s_filt_n, sel_total, used, total);
+    }
     text_color_if_changed(s_count, used >= total ? COL_WARN : COL_DIM);
 }
 
@@ -500,6 +682,9 @@ static void rescan_cb(lv_event_t *e)
     if (s_scanning) return;
     s_scanning = true;
     s_cat_n = 0;
+    s_ser_n = 0;
+    s_level = 0;
+    s_drill = -1;
     label_set_if_changed(s_status, "scanning...");
     text_color_if_changed(s_status, COL_DIM);
     xTaskCreate(discover_task, "discover", 8192, NULL, 4, NULL);
@@ -519,6 +704,8 @@ static void close_cb(lv_event_t *e)
     /* The catalog is a browsing-time structure; holding ~150KB of PSRAM for a
      * screen nobody is looking at is pure waste. */
     if (s_cat) { heap_caps_free(s_cat); s_cat = NULL; s_cat_n = 0; }
+    if (s_ser) { heap_caps_free(s_ser); s_ser = NULL; s_ser_n = 0; }
+    s_level = 0; s_drill = -1;
 
     if (s_pick_mode) {
         s_pick_mode = false;
@@ -563,11 +750,17 @@ static void browser_build(const char *heading)
 {
 
     s_cat = heap_caps_malloc(sizeof(cat_entry_t) * CAT_MAX_NAMES, MALLOC_CAP_SPIRAM);
-    if (s_cat == NULL) {
+    s_ser = heap_caps_malloc(sizeof(ser_entry_t) * CAT_MAX_SERIES, MALLOC_CAP_SPIRAM);
+    if (s_cat == NULL || s_ser == NULL) {
+        if (s_cat) { heap_caps_free(s_cat); s_cat = NULL; }
+        if (s_ser) { heap_caps_free(s_ser); s_ser = NULL; }
         ui_toast("Not enough memory to browse", SEV_CRIT, 3000);
         return;
     }
     s_cat_n = 0;
+    s_ser_n = 0;
+    s_level = 0;
+    s_drill = -1;
     s_page = 0;
     s_query[0] = '\0';
 
@@ -600,9 +793,14 @@ static void browser_build(const char *heading)
     lv_obj_set_pos(done, SCR_W - 130 - GRID_MX, 6);
 
     /* search + filters */
+    s_back_btn = make_btn(s_root, LV_SYMBOL_LEFT, back_cb, NULL);
+    lv_obj_set_size(s_back_btn, 56, 40);
+    lv_obj_set_pos(s_back_btn, GRID_MX, 46);
+    hidden_if_changed(s_back_btn, true);
+
     s_search_btn = make_btn(s_root, "search...", search_cb, NULL);
-    lv_obj_set_size(s_search_btn, 330, 40);
-    lv_obj_set_pos(s_search_btn, GRID_MX, 46);
+    lv_obj_set_size(s_search_btn, 268, 40);
+    lv_obj_set_pos(s_search_btn, GRID_MX + 62, 46);
 
     /* Named for what it does, not for its state: "all"/"selected" alone reads
      * as a label rather than a control, and this is the button you want when
@@ -640,14 +838,27 @@ static void browser_build(const char *heading)
 
         s_row_name[r] = make_label(s_row[r], FONT_M, COL_DIM);
         lv_label_set_long_mode(s_row_name[r], LV_LABEL_LONG_DOT);
-        lv_obj_set_width(s_row_name[r], 420);
+        lv_obj_set_width(s_row_name[r], 410);
         lv_obj_set_pos(s_row_name[r], 48, 10);
 
         s_row_type[r] = make_label(s_row[r], FONT_XS, COL_DIM);
-        lv_obj_set_pos(s_row_type[r], 480, 13);
+        lv_obj_set_pos(s_row_type[r], 470, 13);
 
         s_row_val[r] = make_label(s_row[r], FONT_S, COL_TEXT);
-        lv_obj_set_pos(s_row_val[r], 610, 11);
+        lv_obj_set_style_text_align(s_row_val[r], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(s_row_val[r], 120);
+        lv_obj_set_pos(s_row_val[r], 580, 11);
+
+        /*
+         * A button inside the row, not a region of it. LVGL does not bubble
+         * clicks by default, so the chevron consumes its own tap and the row
+         * underneath does not also toggle the selection.
+         */
+        s_row_more[r] = make_btn(s_row[r], LV_SYMBOL_RIGHT, drill_cb,
+                                 (void *)(intptr_t)r);
+        lv_obj_set_size(s_row_more[r], 46, 34);
+        lv_obj_set_pos(s_row_more[r], SCR_W - 2 * GRID_MX - 50, 2);
+        lv_obj_set_style_bg_color(s_row_more[r], COL_PANEL_ALT, 0);
 
         hidden_if_changed(s_row[r], true);
     }
