@@ -203,6 +203,20 @@ static void refilter(void)
     if (s_page >= pages) s_page = pages > 0 ? pages - 1 : 0;
 }
 
+/* Cells occupied on screen 0, so capacity is visible while picking rather
+ * than discovered by a refusal. */
+static int cells_used(void)
+{
+    const config_t *c = config_get();
+    int n = 0;
+    for (int i = 0; i < c->n_panels; i++) {
+        if (!c->panels[i].sel[0] || c->panels[i].screen != 0) continue;
+        n += (c->panels[i].w ? c->panels[i].w : 1) *
+             (c->panels[i].h ? c->panels[i].h : 1);
+    }
+    return n;
+}
+
 /* ------------------------------------------------------------- selection */
 
 /*
@@ -267,10 +281,17 @@ static void add_panel_for(const cat_entry_t *e)
     (void)n;
 
     if (!config_place_panel(p)) {
-        /* The screen is full. Refusing is better than silently dropping it or
-         * shuffling everything the user already arranged. */
+        /*
+         * No room. Refusing beats silently dropping the selection or
+         * reshuffling tiles the user already arranged -- but say what would
+         * fit, because a 2x2 failing on a screen with three free cells looks
+         * like a bug otherwise.
+         */
+        char msg[80];
+        snprintf(msg, sizeof(msg), "No room for a %ux%u tile (%d of %d cells used)",
+                 p->w, p->h, cells_used(), GRID_COLS * GRID_ROWS);
         config_panel_remove(p->id);
-        ui_toast("Screen is full - remove a tile first", SEV_WARN, 2500);
+        ui_toast(msg, SEV_WARN, 3000);
         return;
     }
     config_touch();
@@ -360,8 +381,13 @@ static void render_rows(void)
     int pages = (s_filt_n + ROWS_VISIBLE - 1) / ROWS_VISIBLE;
     label_set_fmt_if_changed(s_page_lbl, "page %d / %d",
                              pages ? s_page + 1 : 0, pages);
-    label_set_fmt_if_changed(s_count, "%d shown   %d selected",
-                             s_filt_n, sel_total);
+    int used = cells_used();
+    int total = GRID_COLS * GRID_ROWS;
+    label_set_fmt_if_changed(s_count, "%d shown   %d selected   %d/%d cells",
+                             s_filt_n, sel_total, used, total);
+    /* Amber once the screen is nearly full, so "why did nothing happen?"
+     * becomes "ah, it is full" before the refusal rather than after. */
+    text_color_if_changed(s_count, used >= total ? COL_WARN : COL_DIM);
 }
 
 /* --------------------------------------------------------------- events */
