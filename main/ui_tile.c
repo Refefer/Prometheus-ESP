@@ -77,6 +77,13 @@ static severity_t severity_of(const tile_spec_t *spec, const tile_data_t *d)
     return SEV_OK;
 }
 
+static void clear_clickable(lv_obj_t *o)
+{
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    uint32_t n = lv_obj_get_child_cnt(o);
+    for (uint32_t i = 0; i < n; i++) clear_clickable(lv_obj_get_child(o, i));
+}
+
 tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
 {
     tile_inst_t *t = calloc(1, sizeof(*t));
@@ -116,6 +123,17 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
     lv_obj_clear_flag(t->body, LV_OBJ_FLAG_SCROLLABLE);
 
     if (t->vt->build) t->vt->build(t, t->body);
+
+    /*
+     * The shell owns the tap, so nothing inside may claim it.
+     *
+     * lv_obj_create sets LV_OBJ_FLAG_CLICKABLE by default in LVGL 8, and so
+     * do lv_bar and lv_chart -- so the body, which covers everything below
+     * the title strip, silently swallowed every tap and did nothing with it.
+     * Sweeping the subtree means a renderer cannot reintroduce this by adding
+     * a widget, which is how it got here in the first place.
+     */
+    clear_clickable(t->body);
 
     /*
      * A child that extends past the body is silently CLIPPED -- it simply
