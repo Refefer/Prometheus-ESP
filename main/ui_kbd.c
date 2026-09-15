@@ -75,6 +75,8 @@ static const lv_btnmatrix_ctrl_t k_promql_ctrl[] = {
 
 static lv_obj_t *s_kb;
 
+static void sheet_close(const char *result);   /* defined with the modal sheet */
+
 /* Inline mode */
 static lv_obj_t *s_inline_page;
 static lv_coord_t s_inline_h;      /* the page height to restore on blur */
@@ -126,36 +128,60 @@ static void kb_hide(void)
 /* --------------------------------------------------------- event handling */
 
 /*
- * Wraps LVGL's default handler so the shift key can switch between our two
- * URL maps. Without the intercept the default handler would fall through to
- * its final else-branch and type the shift glyph into the textarea.
+ * Key presses.
+ *
+ * Registered for LV_EVENT_VALUE_CHANGED ONLY, and deliberately not for
+ * LV_EVENT_ALL. lv_keyboard_def_event_cb is what actually types a character,
+ * and LVGL registers it for VALUE_CHANGED alone. Forwarding every event to it
+ * -- LV_EVENT_PRESSING and the draw events fire continuously while a key is
+ * held -- re-runs the insert path on each one, so a single tap produces
+ * hundreds of characters. Narrow registrations make that mistake impossible
+ * to repeat rather than merely fixed.
  */
-static void kb_event(lv_event_t *e)
+static void kb_value_changed(lv_event_t *e)
 {
-    lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *kb = lv_event_get_target(e);
+    uint16_t id = lv_btnmatrix_get_selected_btn(kb);
+    const char *txt = lv_btnmatrix_get_btn_text(kb, id);
 
-    if (code == LV_EVENT_VALUE_CHANGED) {
-        uint16_t id = lv_btnmatrix_get_selected_btn(kb);
-        const char *txt = lv_btnmatrix_get_btn_text(kb, id);
-        if (txt != NULL && strcmp(txt, LV_SYMBOL_UP) == 0) {
-            lv_keyboard_mode_t m = lv_keyboard_get_mode(kb);
-            lv_keyboard_set_mode(kb, m == KB_MODE_URL_LO ? KB_MODE_URL_UP
-                                                        : KB_MODE_URL_LO);
-            return;   /* swallow: do not let the default handler type it */
-        }
+    if (txt != NULL && strcmp(txt, LV_SYMBOL_UP) == 0) {
+        /* Our own shift. The stock "abc"/"ABC" keys switch to the BUILT-IN
+         * maps, which would throw away the URL layout -- the whole reason for
+         * having one. Swallow it so the default handler cannot type the
+         * glyph. */
+        lv_keyboard_mode_t m = lv_keyboard_get_mode(kb);
+        lv_keyboard_set_mode(kb, m == KB_MODE_URL_LO ? KB_MODE_URL_UP
+                                                     : KB_MODE_URL_LO);
+        return;
     }
 
     lv_keyboard_def_event_cb(e);
+}
 
-    /* READY (the tick) and CANCEL (the close key) both dismiss. In modal mode
-     * the sheet owns dismissal, so only the inline path acts here. */
-    if ((code == LV_EVENT_READY || code == LV_EVENT_CANCEL) && s_sheet == NULL) {
-        kb_hide();
-        if (s_inline_page) {
-            lv_obj_set_height(s_inline_page, s_inline_h);
-            s_inline_page = NULL;
-        }
+/* The tick key. In modal mode this commits the sheet, matching Done. */
+static void kb_ready(lv_event_t *e)
+{
+    (void)e;
+    if (s_sheet != NULL) {
+        sheet_close(s_sheet_ta ? lv_textarea_get_text(s_sheet_ta) : "");
+        return;
+    }
+    kb_hide();
+    if (s_inline_page) {
+        lv_obj_set_height(s_inline_page, s_inline_h);
+        s_inline_page = NULL;
+    }
+}
+
+/* The close key: dismiss without committing. */
+static void kb_cancel(lv_event_t *e)
+{
+    (void)e;
+    if (s_sheet != NULL) { sheet_close(NULL); return; }
+    kb_hide();
+    if (s_inline_page) {
+        lv_obj_set_height(s_inline_page, s_inline_h);
+        s_inline_page = NULL;
     }
 }
 
@@ -453,8 +479,11 @@ void ui_kbd_init(void)
     lv_obj_set_style_radius(s_kb, RADIUS_CTRL, LV_PART_ITEMS);
     lv_obj_set_style_bg_color(s_kb, COL_ACCENT, LV_PART_ITEMS | LV_STATE_PRESSED);
 
-    /* Replace, don't stack: our wrapper calls the default handler itself for
-     * everything except the shift key. */
+    /* Replace, don't stack: kb_value_changed calls the default handler itself
+     * for everything except our shift key. Note the narrow event masks --
+     * see the comment on kb_value_changed for why LV_EVENT_ALL is wrong here. */
     lv_obj_remove_event_cb(s_kb, lv_keyboard_def_event_cb);
-    lv_obj_add_event_cb(s_kb, kb_event, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(s_kb, kb_value_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_kb, kb_ready,         LV_EVENT_READY,         NULL);
+    lv_obj_add_event_cb(s_kb, kb_cancel,        LV_EVENT_CANCEL,        NULL);
 }
