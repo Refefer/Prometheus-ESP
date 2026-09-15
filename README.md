@@ -23,7 +23,8 @@ Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 |---|---|
 | M0 scaffold: panel, partitions, storage, parser linked | done |
 | M1 exposition parser + host tests | done |
-| M2 first real number from a real exporter | next |
+| M2 first real number from a real exporter | done |
+| M7 on-device WiFi setup (reordered ahead) | done |
 
 ## Build and flash
 
@@ -80,6 +81,35 @@ To add a real capture to the corpus:
 ```sh
 curl -s localhost:9100/metrics > components/prom/test/corpus/node_exporter.txt
 ```
+
+## Test exporter
+
+`tools/fake_exporter.py` serves live-ish data -- counters that actually climb,
+a gauge that wanders, a histogram whose buckets fill -- so `rate()` and
+`histogram_quantile()` have something real to chew on. More usefully, it
+injects the failure modes a real exporter will not produce on demand:
+
+```sh
+python3 tools/fake_exporter.py --port 9100
+
+curl 'localhost:9100/mode?set=huge'   # 470KB, 261 distinct families
+curl 'localhost:9100/mode?set=dup'    # the same series repeated 40x
+curl 'localhost:9100/mode?set=html'   # a web page, not metrics
+curl 'localhost:9100/mode?set=chunked'
+curl localhost:9100/reset             # process-restart counter semantics
+curl localhost:9100/down              # start refusing, /up to resume
+```
+
+Verified on hardware against it:
+
+| | |
+|---|---|
+| 474KB body, 5481 samples | SRAM and PSRAM **unchanged** vs a 1.8KB body |
+| counter at 1.2e13 | 8.01 MiB/s -- a float32 delta here is exactly zero |
+| histogram p99 | 100 ms, matching the hand calculation |
+| endpoint killed | classified "connection failed", backs off, recovers |
+| gap in scrapes | rate re-baselines instead of averaging across the gap |
+| 40 duplicate buckets | quantile stays correct |
 
 ## Memory baseline
 

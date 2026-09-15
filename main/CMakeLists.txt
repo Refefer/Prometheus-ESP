@@ -8,6 +8,8 @@ idf_component_register(
         "wifi_mgr.c"
         "ui_theme.c"
         "ui_fmt.c"
+        "http_util.c"
+        "poller.c"
         "ui_widgets.c"
         "ui_kbd.c"
         "ui_setup.c"

@@ -70,6 +70,23 @@ void prom_hist_repair(double *cum, int n)
     }
 }
 
+/*
+ * Index of the highest bucket with a finite bound.
+ *
+ * Walking back rather than assuming n-2 matters because a scrape can contain
+ * more than one infinite bound -- a buggy exporter repeating a family, or a
+ * proxy concatenating two scrapes. Taking n-2 blindly then returns infinity,
+ * which propagates out as a non-finite "quantile" and shows on the panel as
+ * no data at all rather than as a number.
+ */
+static int last_finite(const double *le, int n)
+{
+    for (int i = n - 1; i >= 0; i--) {
+        if (isfinite(le[i])) return i;
+    }
+    return -1;
+}
+
 double prom_hist_quantile(double q, const double *le, const double *cum, int n)
 {
     if (n <= 0) return NAN;
@@ -78,7 +95,11 @@ double prom_hist_quantile(double q, const double *le, const double *cum, int n)
     if (!(total > 0.0)) return NAN;
 
     if (q <= 0.0) return le[0] < 0.0 ? le[0] : 0.0;
-    if (q >= 1.0) return isinf(le[n - 1]) ? (n >= 2 ? le[n - 2] : NAN) : le[n - 1];
+    if (q >= 1.0) {
+        if (isfinite(le[n - 1])) return le[n - 1];
+        int f = last_finite(le, n);
+        return f >= 0 ? le[f] : NAN;
+    }
 
     double rank = q * total;
 
@@ -86,10 +107,13 @@ double prom_hist_quantile(double q, const double *le, const double *cum, int n)
     while (i < n && cum[i] < rank) i++;
     if (i >= n) i = n - 1;
 
-    /* The top bucket is unbounded, so there is nothing to interpolate towards.
-     * Report its lower bound, which is the strongest true statement available:
+    /* An unbounded bucket has nothing to interpolate towards. Report the
+     * highest finite bound, which is the strongest true statement available:
      * "at least this much". */
-    if (i == n - 1 && isinf(le[i])) return n >= 2 ? le[n - 2] : NAN;
+    if (isinf(le[i])) {
+        int f = last_finite(le, n);
+        return f >= 0 ? le[f] : NAN;
+    }
 
     /* Buckets may legitimately start below zero (rare, but some custom
      * histograms do it); the first bucket's lower bound is then le[0], not 0. */

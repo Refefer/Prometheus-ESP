@@ -14,9 +14,11 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 
 #include "lvgl_port.h"
+#include "poller.h"
 #include "prom_text.h"
 #include "secrets.h"
 #include "storage.h"
@@ -33,9 +35,6 @@
 
 static const char *TAG = "app";
 
-static lv_obj_t *s_mem_label;
-static lv_obj_t *s_parse_label;
-static lv_obj_t *s_net_label;
 static char       s_smoke_result[96];
 
 /* ------------------------------------------------- PSRAM-preferring malloc */
@@ -119,67 +118,6 @@ static void run_parser_smoke(char *out, size_t cap)
 
 /* ----------------------------------------------------------------- boot UI */
 
-/* Runs in the LVGL task via lv_timer, so no lock is needed. */
-static void mem_tick(lv_timer_t *t)
-{
-    (void)t;
-    size_t cfg_total = 0, cfg_used = 0;
-    storage_usage(STORAGE_CFG_PATH, &cfg_total, &cfg_used);
-
-    /*
-     * Also log the numbers every few seconds. This board's console is the
-     * chip's native USB, which re-enumerates on reset -- so anything printed
-     * during boot is gone before a host can attach, and a heartbeat is the
-     * only way to read the memory budget over serial at all.
-     */
-    static int tick;
-    if (tick++ % 5 == 0) {
-        ESP_LOGI(TAG, "SRAM %uK  PSRAM %uK (largest block %uK)  cfg %u/%uK  data %s",
-                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-                 (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
-                 (unsigned)(cfg_used / 1024), (unsigned)(cfg_total / 1024),
-                 storage_data_ready() ? "ok" : "unavailable");
-        ESP_LOGI(TAG, "%s", s_smoke_result);
-    }
-
-    if (s_net_label) {
-        char ip[16] = "";
-        int8_t rssi = 0;
-        wifi_mgr_info(ip, sizeof(ip), &rssi);
-        switch (wifi_mgr_state()) {
-        case WIFI_ST_CONNECTED:
-            label_set_fmt_if_changed(s_net_label, "%s   %d dBm", ip, (int)rssi);
-            text_color_if_changed(s_net_label, COL_OK);
-            break;
-        case WIFI_ST_CONNECTING:
-            label_set_if_changed(s_net_label, "connecting...");
-            text_color_if_changed(s_net_label, COL_WARN);
-            break;
-        case WIFI_ST_FAILED:
-            label_set_fmt_if_changed(s_net_label, "offline - %s",
-                                     wifi_mgr_fail_reason());
-            text_color_if_changed(s_net_label, COL_CRIT);
-            break;
-        default:
-            label_set_if_changed(s_net_label, "no network configured");
-            text_color_if_changed(s_net_label, COL_DIM);
-            break;
-        }
-    }
-
-    if (s_mem_label) {
-        label_set_fmt_if_changed(
-            s_mem_label,
-            "SRAM free %u KB   PSRAM free %u KB   largest PSRAM block %u KB\n"
-            "config %u/%u KB   data %s",
-            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-            (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-            (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024),
-            (unsigned)(cfg_used / 1024), (unsigned)(cfg_total / 1024),
-            storage_data_ready() ? "mounted" : "unavailable");
-    }
-}
 
 static void reopen_setup_cb(lv_event_t *e)
 {
@@ -187,32 +125,132 @@ static void reopen_setup_cb(lv_event_t *e)
     ui_setup_open();
 }
 
-/* The interim status screen shown when WiFi is already configured. The
- * dashboard replaces this entirely once the tile framework lands. */
-static void build_status_ui(void)
+/*
+ * A real tile grid, laid out with the production geometry from ui_layout.h so
+ * this milestone validates the grid arithmetic on the actual panel as well as
+ * the data path. The watch list behind it is still fixed -- the metric store
+ * and the browser replace that; the layout and the refresh path stay.
+ */
+static lv_obj_t *s_tile_val[POLLER_MAX_WATCH];
+static lv_obj_t *s_tile_suf[POLLER_MAX_WATCH];
+static lv_obj_t *s_tile_ttl[POLLER_MAX_WATCH];
+static lv_obj_t *s_hdr_status;
+static lv_obj_t *s_ftr_left;
+static lv_obj_t *s_ftr_right;
+static uint32_t  s_seen_gen = UINT32_MAX;
+
+static void build_dashboard(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
-    lv_obj_t *title = make_label(scr, FONT_XL, COL_TEXT);
+    /* header */
+    lv_obj_t *title = make_label(scr, FONT_L, COL_TEXT);
     lv_label_set_text(title, "Prometheus Panel");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_set_pos(title, GRID_MX, 10);
 
-    s_net_label = make_label(scr, FONT_L, COL_ACCENT);
-    lv_obj_align(s_net_label, LV_ALIGN_TOP_MID, 0, 88);
+    s_hdr_status = make_label(scr, FONT_S, COL_DIM);
+    lv_obj_set_pos(s_hdr_status, 300, 14);
 
-    s_parse_label = make_label(scr, FONT_M, COL_OK);
-    lv_obj_align(s_parse_label, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_t *gear = make_btn(scr, LV_SYMBOL_SETTINGS, reopen_setup_cb, NULL);
+    lv_obj_set_size(gear, 52, 32);
+    lv_obj_set_pos(gear, SCR_W - 52 - GRID_MX, 4);
 
-    s_mem_label = make_label(scr, FONT_M, COL_DIM);
-    lv_obj_set_style_text_align(s_mem_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_mem_label, LV_ALIGN_BOTTOM_MID, 0, -56);
+    lv_obj_t *div = make_divider(scr, SCR_W);
+    lv_obj_set_pos(div, 0, HEADER_H - 1);
 
-    lv_obj_t *b = make_btn(scr, LV_SYMBOL_SETTINGS "  Wi-Fi setup",
-                           reopen_setup_cb, NULL);
-    lv_obj_set_size(b, 240, BTN_H);
-    lv_obj_align(b, LV_ALIGN_BOTTOM_MID, 0, -8);
+    /* tiles: 4 columns x 2 rows of 1x1 cells */
+    for (int i = 0; i < POLLER_MAX_WATCH; i++) {
+        int col = i % GRID_COLS, row = i / GRID_COLS;
+        lv_obj_t *card = make_card(scr);
+        lv_obj_set_size(card, TILE_W(1), TILE_H(1));
+        lv_obj_set_pos(card, TILE_X(col), TILE_Y(row));
 
+        s_tile_ttl[i] = make_label(card, FONT_S, COL_DIM);
+        lv_label_set_long_mode(s_tile_ttl[i], LV_LABEL_LONG_DOT);
+        lv_obj_set_width(s_tile_ttl[i], TILE_W(1) - 2 * PAD_S);
+        lv_obj_set_pos(s_tile_ttl[i], 0, 0);
+
+        /* FONT_XL stands in for the generated digits-only NUM_M face, which
+         * arrives with the tile renderers. */
+        s_tile_val[i] = make_label(card, FONT_XL, COL_TEXT);
+        lv_obj_set_pos(s_tile_val[i], 0, 34);
+
+        s_tile_suf[i] = make_label(card, FONT_M, COL_DIM);
+        lv_obj_set_pos(s_tile_suf[i], 0, 82);
+    }
+
+    /* footer */
+    lv_obj_t *fdiv = make_divider(scr, SCR_W);
+    lv_obj_set_pos(fdiv, 0, FOOTER_Y);
+
+    s_ftr_left = make_label(scr, FONT_XS, COL_DIM);
+    lv_obj_set_pos(s_ftr_left, GRID_MX, FOOTER_Y + 6);
+
+    s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
+    lv_obj_set_pos(s_ftr_right, SCR_W - 320, FOOTER_Y + 6);
+}
+
+/*
+ * Runs in the LVGL task. Compares the poller's generation with != rather than
+ * > so a uint32 wrap is a non-event, and repaints regardless of whether data
+ * changed, because the age readout has to keep counting up when it does not.
+ */
+static void dashboard_tick(lv_timer_t *t)
+{
+    (void)t;
+    if (s_tile_val[0] == NULL) return;
+
+    poller_snap_t snap;
+    poller_snapshot(&snap);
+
+    if (snap.generation != s_seen_gen) {
+        s_seen_gen = snap.generation;
+        for (int i = 0; i < snap.n && i < POLLER_MAX_WATCH; i++) {
+            const poller_metric_t *m = &snap.m[i];
+            label_set_if_changed(s_tile_ttl[i], m->label);
+            if (m->valid) {
+                label_set_if_changed(s_tile_val[i], m->num);
+                label_set_if_changed(s_tile_suf[i], m->suffix);
+                text_color_if_changed(s_tile_val[i], COL_TEXT);
+            } else {
+                /* Warming up is not the same as broken, and neither is the
+                 * same as zero -- a zero on the first poll of a counter is a
+                 * lie that looks exactly like a reading. */
+                label_set_if_changed(s_tile_val[i], "--");
+                label_set_if_changed(s_tile_suf[i],
+                                     m->restarted ? "restarted"
+                                                  : m->warming ? "warming up"
+                                                               : "no data");
+                text_color_if_changed(s_tile_val[i], COL_STALE);
+            }
+        }
+
+        char ip[16] = ""; int8_t rssi = 0;
+        wifi_mgr_info(ip, sizeof(ip), &rssi);
+        label_set_fmt_if_changed(s_hdr_status, "%s   %d dBm", ip, (int)rssi);
+        text_color_if_changed(s_hdr_status,
+                              wifi_mgr_is_connected() ? COL_OK : COL_CRIT);
+
+        label_set_fmt_if_changed(s_ftr_right,
+                                 "%u samples   %u B   %u ms   SRAM %uK  PSRAM %uK",
+                                 (unsigned)snap.samples, (unsigned)snap.body_bytes,
+                                 (unsigned)snap.latency_ms,
+                                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    }
+
+    /* Age ticks every second even when nothing new arrives. */
+    poller_snap_t s2;
+    poller_snapshot(&s2);
+    if (s2.last_ok_ms > 0) {
+        int age = (int)((esp_timer_get_time() / 1000 - s2.last_ok_ms) / 1000);
+        label_set_fmt_if_changed(s_ftr_left, "updated %ds ago   %s", age, s2.status);
+        text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
+    } else {
+        label_set_fmt_if_changed(s_ftr_left, "%s", s2.status);
+        text_color_if_changed(s_ftr_left, s2.ok ? COL_DIM : COL_WARN);
+    }
 }
 
 /* -------------------------------------------------------------------- main */
@@ -247,8 +285,8 @@ void app_main(void)
     if (lvgl_port_lock(-1)) {
         ui_kbd_init();
         if (secrets_have_wifi()) {
-            build_status_ui();
-            lv_label_set_text(s_parse_label, s_smoke_result);
+            build_dashboard();
+            lv_timer_create(dashboard_tick, 250, NULL);
         } else {
             /* First boot: land straight in setup rather than showing a
              * dashboard that cannot possibly have data. */
@@ -257,9 +295,13 @@ void app_main(void)
         /* Created regardless of which screen is up: the heartbeat is the only
          * way to see this device's state over serial, since the native-USB
          * console loses everything printed before a host attaches. */
-        mem_tick(NULL);
-        lv_timer_create(mem_tick, 1000, NULL);
         lvgl_port_unlock();
+    }
+
+    if (secrets_have_wifi()) {
+        /* Milestone scope: a fixed endpoint. The editor and the stored
+         * endpoint list replace this argument, not the call. */
+        poller_start("http://192.168.1.2:9100/metrics", 5);
     }
 
     ESP_LOGI(TAG, "boot complete: SRAM %u KB free, PSRAM %u KB free",

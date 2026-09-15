@@ -380,6 +380,23 @@ static void test_hist(void)
     double cum2[] = { 1, 2, 3 };
     CHECK(prom_hist_quantile(1.0, le2, cum2, 3) == 3.0, "finite top bound");
 
+    /* More than one infinite bound -- a buggy exporter repeating a family, or
+     * a proxy concatenating scrapes. Taking n-2 blindly used to return
+     * infinity, which shows on a panel as no data rather than as a number. */
+    double le3[]  = { 0.005, 0.01, INFINITY, INFINITY };
+    double cum3[] = { 10,    25,   80,       80        };
+    double qq = prom_hist_quantile(0.99, le3, cum3, 4);
+    CHECK(isfinite(qq) && fabs(qq - 0.01) < 1e-12,
+          "duplicate +Inf bounds still yield a finite quantile (got %f)", qq);
+    CHECK(isfinite(prom_hist_quantile(1.0, le3, cum3, 4)),
+          "q=1 with duplicate +Inf is finite");
+
+    /* Every bound infinite: genuinely nothing to say, so NaN is correct. */
+    double le4[]  = { INFINITY, INFINITY };
+    double cum4[] = { 5, 5 };
+    CHECK(isnan(prom_hist_quantile(0.5, le4, cum4, 2)),
+          "all-infinite bounds is NaN, not a bogus number");
+
     CHECK(isnan(prom_hist_average(1.0, 0.0)), "avg guards zero count");
     CHECK(prom_hist_average(10.0, 4.0) == 2.5, "avg");
 }
