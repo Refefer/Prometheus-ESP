@@ -131,17 +131,27 @@ static esp_err_t write_config(const char *path)
         fprintf(f, "    { \"id\": %u, \"ep\": %u, \"sel\": ",
                 (unsigned)p->id, (unsigned)p->ep_id);
         write_escaped(f, p->sel);
-        fputs(", \"sel_b\": ", f);
-        write_escaped(f, p->sel_b);
         fprintf(f, ", \"op\": %u", (unsigned)p->op);
         fputs(", \"title\": ", f);
         write_escaped(f, p->title);
         fputs(", \"unit\": ", f);
         write_escaped(f, p->unit);
-        fprintf(f, ", \"kind\": %u, \"fmt\": %u, \"agg\": %u",
-                (unsigned)p->kind, (unsigned)p->fmt, (unsigned)p->agg);
-        fputs(", \"q\": ", f);    write_float(f, p->q);
-        fprintf(f, ", \"window_s\": %u", (unsigned)p->window_s);
+        fprintf(f, ", \"kind\": %u, \"fmt\": %u", (unsigned)p->kind,
+                (unsigned)p->fmt);
+
+        fputs(", \"terms\": [", f);
+        for (int k = 0; k < p->n_terms; k++) {
+            const cfg_term_t *tm = &p->terms[k];
+            if (k) fputs(", ", f);
+            fputs("{ \"sel\": ", f);
+            write_escaped(f, tm->sel);
+            fprintf(f, ", \"reduce\": %u, \"agg\": %u, \"window_s\": %u",
+                    (unsigned)tm->reduce, (unsigned)tm->agg,
+                    (unsigned)tm->window_s);
+            fputs(", \"q\": ", f); write_float(f, tm->q);
+            fputs(" }", f);
+        }
+        fputs("]", f);
         fputs(", \"vmin\": ", f); write_float(f, p->vmin);
         fputs(", \"vmax\": ", f); write_float(f, p->vmax);
         fputs(", \"warn\": ", f); write_float(f, p->warn);
@@ -319,16 +329,51 @@ static bool parse_into(const char *json, size_t len)
             p->id    = (uint16_t)get_int(it, "id", s_cfg.next_id++);
             p->ep_id = (uint16_t)get_int(it, "ep", 0);
             get_str(it, "sel", p->sel, sizeof(p->sel));
-            get_str(it, "sel_b", p->sel_b, sizeof(p->sel_b));
             p->op = (panel_op_t)get_int(it, "op", OP_NONE);
             get_str(it, "title", p->title, sizeof(p->title));
             get_str(it, "unit", p->unit, sizeof(p->unit));
             p->kind = (tile_kind_t)get_int(it, "kind", TILE_STAT);
             p->fmt  = (fmt_mode_t)get_int(it, "fmt", FMT_AUTO);
-            p->agg  = (agg_mode_t)get_int(it, "agg", AGG_LAST);
-            float q = get_float(it, "q");
-            p->q    = isnan(q) ? 0.0f : q;
-            p->window_s = (uint16_t)get_int(it, "window_s", 300);
+
+            const cJSON *terms = cJSON_GetObjectItem(it, "terms"), *tit = NULL;
+            if (cJSON_IsArray(terms) && cJSON_GetArraySize(terms) > 0) {
+                cJSON_ArrayForEach(tit, terms) {
+                    if (p->n_terms >= CFG_MAX_TERMS) break;
+                    cfg_term_t *tm = &p->terms[p->n_terms];
+                    memset(tm, 0, sizeof(*tm));
+                    get_str(tit, "sel", tm->sel, sizeof(tm->sel));
+                    tm->reduce   = (uint8_t)get_int(tit, "reduce", RED_SUM);
+                    tm->agg      = (uint8_t)get_int(tit, "agg", AGG_LAST);
+                    tm->window_s = (uint16_t)get_int(tit, "window_s", 0);
+                    float tq     = get_float(tit, "q");
+                    tm->q        = isnan(tq) ? 0.0f : tq;
+                    if (tm->sel[0]) p->n_terms++;
+                }
+            } else {
+                /*
+                 * Schema 1 carried one or two selectors directly on the
+                 * panel. Migrate rather than reject: a config written by the
+                 * touch UI last week must keep working.
+                 */
+                cfg_term_t *a = &p->terms[0];
+                memset(a, 0, sizeof(*a));
+                get_str(it, "sel", a->sel, sizeof(a->sel));
+                a->reduce   = RED_FIRST;   /* what schema 1 actually did */
+                a->agg      = (uint8_t)get_int(it, "agg", AGG_LAST);
+                a->window_s = (uint16_t)get_int(it, "window_s", 0);
+                float q     = get_float(it, "q");
+                a->q        = isnan(q) ? 0.0f : q;
+                if (a->sel[0]) p->n_terms = 1;
+
+                char selb[CFG_SEL_MAX] = "";
+                get_str(it, "sel_b", selb, sizeof(selb));
+                if (selb[0] && p->n_terms == 1) {
+                    cfg_term_t *b = &p->terms[1];
+                    *b = *a;
+                    strncpy(b->sel, selb, sizeof(b->sel) - 1);
+                    p->n_terms = 2;
+                }
+            }
             p->vmin = get_float(it, "vmin");
             p->vmax = get_float(it, "vmax");
             p->warn = get_float(it, "warn");
@@ -340,7 +385,10 @@ static bool parse_into(const char *json, size_t len)
             p->row = (uint8_t)get_int(it, "row", 0);
             p->w   = (uint8_t)get_int(it, "w", 1);
             p->h   = (uint8_t)get_int(it, "h", 1);
-            if (p->sel[0]) s_cfg.n_panels++;
+            if (p->n_terms > 0) {
+                strncpy(p->sel, p->terms[0].sel, sizeof(p->sel) - 1);
+                s_cfg.n_panels++;
+            }
         }
     }
 
@@ -419,6 +467,20 @@ void config_mark_good_boot(void)
     if (write_config(PATH_BAK) == ESP_OK) ESP_LOGD(TAG, "backup refreshed");
 }
 
+cfg_term_t *config_term0(cfg_panel_t *p)
+{
+    if (p->n_terms == 0) {
+        memset(&p->terms[0], 0, sizeof(p->terms[0]));
+        p->terms[0].reduce = RED_SUM;
+        p->terms[0].agg    = AGG_LAST;
+        p->n_terms = 1;
+    }
+    /* Keep the panel's mirror of the selector in step, since the browser and
+     * the dashboard both key off it. */
+    strncpy(p->sel, p->terms[0].sel, sizeof(p->sel) - 1);
+    return &p->terms[0];
+}
+
 cfg_panel_t *config_panel_add(void)
 {
     if (s_cfg.n_panels >= CFG_MAX_PANELS) return NULL;
@@ -427,7 +489,6 @@ cfg_panel_t *config_panel_add(void)
     p->id   = s_cfg.next_id++;
     p->kind = TILE_STAT;
     p->fmt  = FMT_AUTO;
-    p->agg  = AGG_LAST;
     p->vmin = p->vmax = p->warn = p->crit = NAN;
     p->w = p->h = 1;
     return p;

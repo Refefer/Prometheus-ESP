@@ -2,6 +2,7 @@
 
 #include "http_util.h"
 #include "prom_math.h"
+#include "poller_terms.h"
 #include "prom_ident.h"
 #include "prom_text.h"
 #include "ui_fmt.h"
@@ -27,100 +28,40 @@ static const char *TAG = "poller";
 /*
  * The watch list, rebuilt from the stored panels.
  *
- * Each entry keeps its own copy of the selector text because the parsed label
- * pointers alias it -- prom_parse_selector unescapes in place, so the scratch
- * must outlive the parse.
+ * A watch is a panel's worth of terms plus the state needed to present them.
+ * Every panel has at least one term; a derived panel has two or more and an
+ * op that combines them.
  */
 typedef struct {
     uint16_t     panel_id;
     char         label[POLLER_NAME_MAX];
-    char         scratch[CFG_SEL_MAX];
-    const char  *name;
-    uint16_t     name_len;
-    prom_label_t labels[8];
-    uint8_t      n_labels;
-    agg_mode_t   agg;
     fmt_mode_t   fmt;
     char         unit[8];
-    float        q;              /* >0 => derive this quantile from buckets */
-    bool         active;
-
-    bool         multi;
-
-    /* Second operand for a derived panel. Its own scratch, because
-     * prom_parse_selector unescapes in place and the label pointers alias it. */
-    /*
-     * Baseline for a windowed quantile: the bucket counts as of window_s ago,
-     * and when they were taken. One snapshot rather than a ring, so the
-     * effective window drifts between window_s and window_s + one poll --
-     * which is well inside the noise of the thing being measured and costs
-     * 256 bytes instead of kilobytes.
-     */
-    uint16_t     window_s;
-
-    /*
-     * Sample ring for a windowed rate.
-     *
-     * A counter that only updates on its exporter's log interval steps rather
-     * than flows: polled faster than it updates, most polls see no change and
-     * the rate reads zero, with an occasional spike. Measured on a real
-     * inference server, prompt_tokens_total sat at 0 for four polls then
-     * jumped 97,000 tokens.
-     *
-     * Differencing against the oldest sample still inside the window smooths
-     * across those steps and updates every poll -- which is what rate(x[5m])
-     * means, and why it exists.
-     */
-    double       win_v[RATE_WIN_MAX];
-    int64_t      win_t[RATE_WIN_MAX];
-    uint8_t      win_n, win_head;
-    float        win_last;
-    bool         win_valid;
-
-    double       base_cum[PROM_MAX_BUCKETS];
-    double       base_le[PROM_MAX_BUCKETS];
-    int          base_nb;
-    int64_t      base_t;
-
     panel_op_t   op;
-    char         scratch_b[CFG_SEL_MAX];
-    const char  *name_b;
-    uint16_t     name_b_len;
-    prom_label_t labels_b[8];
-    uint8_t      n_labels_b;
-    rate_state_t rate_b;
+    bool         multi;
+    uint8_t      n_terms;
+    term_rt_t    terms[CFG_MAX_TERMS];
 
-    rate_state_t rate;
     fmt_state_t  fmt_state;
 
-    /* Per-child state for a multi-series watch, keyed by the child's label so
-     * a baseline survives series appearing and disappearing between scrapes. */
+    /* Multi-series children, keyed by label so a baseline survives a series
+     * appearing or disappearing between scrapes. */
     char         child_key[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
     rate_state_t child_rate[POLLER_MAX_CHILDREN];
     uint8_t      n_child;
-    uint8_t      order[POLLER_MAX_CHILDREN];  /* display order, held steady */
-    uint8_t      resort_in;                   /* publishes until a re-rank */
+    uint8_t      order[POLLER_MAX_CHILDREN];
+    uint8_t      resort_in;
+
+    /* Per-scrape child accumulation (terms[0] only). */
+    uint8_t      sc_n_child;
+    uint8_t      sc_n_matched;
+    char         sc_child_label[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
+    double       sc_child_value[POLLER_MAX_CHILDREN];
 } watch_rt_t;
 
-/* Per-scrape accumulation. */
-typedef struct {
-    bool   seen;
-    bool   seen_b;
-    prom_value_t value_b;
-    prom_value_t value;
-    int    nb;
-    double le[PROM_MAX_BUCKETS];
-    double cum[PROM_MAX_BUCKETS];
-
-    uint8_t n_child;
-    uint8_t n_matched;
-    char    child_label[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
-    double  child_value[POLLER_MAX_CHILDREN];
-} watch_scratch_t;
-
-static watch_rt_t      s_watch[POLLER_MAX_WATCH];
-static int             s_watch_n;
-static watch_scratch_t s_scratch[POLLER_MAX_WATCH];
+/* PSRAM: ~85KB of term state has no business in the internal heap. */
+static watch_rt_t *s_watch;
+static int         s_watch_n;
 
 static SemaphoreHandle_t s_mux;
 static poller_snap_t     s_snap;
@@ -150,55 +91,54 @@ static void  psram_free(void *p)   { heap_caps_free(p); }
 /* Every label on the watch must be present on the sample with the same value.
  * Extra labels on the sample are fine -- a selector is a filter, not an
  * exact-match requirement. */
-static bool labels_match_n(const prom_sample_t *s, const prom_label_t *want,
-                           uint8_t n)
+/*
+ * Glob match over a label VALUE: '*' stands for any run of characters.
+ *
+ * Only '*' is supported, and only in values. That covers mode="prefill_*"
+ * and instance="node-*", which is what selecting a set of series actually
+ * needs; a full regex engine would be several times the code for cases nobody
+ * has asked for.
+ */
+static bool glob_match(const char *pat, uint16_t plen,
+                       const char *str, uint16_t slen)
 {
-    for (uint8_t i = 0; i < n; i++) {
+    uint16_t p = 0, sIdx = 0, star = 0xFFFF, mark = 0;
+    while (sIdx < slen) {
+        if (p < plen && (pat[p] == '?' || pat[p] == str[sIdx])) { p++; sIdx++; }
+        else if (p < plen && pat[p] == '*') { star = p++; mark = sIdx; }
+        else if (star != 0xFFFF) { p = (uint16_t)(star + 1); sIdx = ++mark; }
+        else return false;
+    }
+    while (p < plen && pat[p] == '*') p++;
+    return p == plen;
+}
+
+static bool label_value_eq(const prom_label_t *want, const prom_label_t *got,
+                           bool use_glob)
+{
+    if (use_glob) return glob_match(want->val, want->val_len,
+                                    got->val, got->val_len);
+    return want->val_len == got->val_len &&
+           memcmp(want->val, got->val, want->val_len) == 0;
+}
+
+/* Every label on the term must be present on the sample and match. Extra
+ * labels on the sample are fine -- a selector is a filter, not an exact-match
+ * requirement. */
+static bool term_matches(const prom_sample_t *s, const term_rt_t *tm)
+{
+    for (uint8_t i = 0; i < tm->n_labels; i++) {
         bool found = false;
         for (uint8_t j = 0; j < s->n_labels; j++) {
-            if (s->labels[j].key_len != want[i].key_len) continue;
-            if (memcmp(s->labels[j].key, want[i].key, want[i].key_len) != 0) continue;
-            found = (s->labels[j].val_len == want[i].val_len) &&
-                    memcmp(s->labels[j].val, want[i].val, want[i].val_len) == 0;
+            if (s->labels[j].key_len != tm->labels[i].key_len) continue;
+            if (memcmp(s->labels[j].key, tm->labels[i].key,
+                       tm->labels[i].key_len) != 0) continue;
+            found = label_value_eq(&tm->labels[i], &s->labels[j], tm->has_glob);
             break;
         }
         if (!found) return false;
     }
     return true;
-}
-
-static bool labels_match(const prom_sample_t *s, const watch_rt_t *w)
-{
-    return labels_match_n(s, w->labels, w->n_labels);
-}
-
-/*
- * Name a child by the labels that actually distinguish it -- the ones the
- * watch's filter does not already pin. For node_cpu_seconds_total filtered to
- * nothing that yields "0 idle"; filtered to cpu="0" it yields just "idle",
- * which is what the reader needs and all a 185px row can hold.
- */
-static void child_label_of(const prom_sample_t *s, const watch_rt_t *w,
-                           char *out, size_t cap)
-{
-    size_t o = 0;
-    out[0] = '\0';
-    for (uint8_t i = 0; i < s->n_labels && o + 1 < cap; i++) {
-        bool pinned = false;
-        for (uint8_t j = 0; j < w->n_labels; j++) {
-            if (s->labels[i].key_len == w->labels[j].key_len &&
-                memcmp(s->labels[i].key, w->labels[j].key,
-                       w->labels[i].key_len) == 0) { pinned = true; break; }
-        }
-        if (pinned) continue;
-        if (o > 0 && o + 1 < cap) out[o++] = ' ';
-        size_t n = s->labels[i].val_len;
-        if (o + n >= cap) n = cap - o - 1;
-        memcpy(out + o, s->labels[i].val, n);
-        o += n;
-    }
-    out[o] = '\0';
-    if (out[0] == '\0') strncpy(out, "value", cap - 1);
 }
 
 static bool name_is(const prom_sample_t *s, const char *want, uint16_t len)
@@ -211,82 +151,128 @@ static bool base_is(const prom_sample_t *s, const char *want, uint16_t len)
     return s->base_len == len && memcmp(s->base_name, want, len) == 0;
 }
 
+/* Fold one matching sample into the term, per its reducer. */
+static void term_accumulate(term_rt_t *tm, double v)
+{
+    if (!tm->seen) {
+        tm->acc   = v;
+        tm->n_acc = 1;
+        tm->seen  = true;
+        return;
+    }
+    tm->n_acc++;
+    switch (tm->reduce) {
+    case RED_SUM:
+    case RED_AVG:   tm->acc += v; break;
+    case RED_MIN:   if (v < tm->acc) tm->acc = v; break;
+    case RED_MAX:   if (v > tm->acc) tm->acc = v; break;
+    case RED_COUNT: break;                 /* n_acc is the answer */
+    case RED_FIRST:
+    default:        break;                 /* keep the first */
+    }
+}
+
+static double term_reduced(const term_rt_t *tm)
+{
+    if (!tm->seen) return NAN;
+    switch (tm->reduce) {
+    case RED_AVG:   return tm->n_acc ? tm->acc / tm->n_acc : NAN;
+    case RED_COUNT: return (double)tm->n_acc;
+    default:        return tm->acc;
+    }
+}
+
+/*
+ * Name a child by the labels that actually distinguish it -- the ones the
+ * term's filter does not already pin.
+ */
+static void child_label_of(const prom_sample_t *s, const term_rt_t *tm,
+                           char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = '\0';
+    for (uint8_t i = 0; i < s->n_labels && o + 1 < cap; i++) {
+        bool pinned = false;
+        for (uint8_t j = 0; j < tm->n_labels; j++) {
+            if (s->labels[i].key_len == tm->labels[j].key_len &&
+                memcmp(s->labels[i].key, tm->labels[j].key,
+                       s->labels[i].key_len) == 0) { pinned = true; break; }
+        }
+        if (pinned) continue;
+        if (o > 0 && o + 1 < cap) out[o++] = ' ';
+        size_t n = s->labels[i].val_len;
+        if (o + n >= cap) n = cap - o - 1;
+        memcpy(out + o, s->labels[i].val, n);
+        o += n;
+    }
+    out[o] = '\0';
+    if (out[0] == '\0') strncpy(out, "value", cap - 1);
+}
+
 static bool on_sample(void *ctx, const prom_sample_t *s)
 {
     (void)ctx;
     for (int i = 0; i < s_watch_n; i++) {
-        const watch_rt_t *w = &s_watch[i];
-        if (!w->active) continue;
+        watch_rt_t *w = &s_watch[i];
 
-        if (w->q > 0.0f) {
-            if (s->role != PROM_ROLE_BUCKET) continue;
-            if (!base_is(s, w->name, w->name_len)) continue;
-            /*
-             * The label filter applies to buckets as much as to plain
-             * samples: a family split across label sets (an LLM server splits
-             * latency by is_streaming) would otherwise have its buckets summed
-             * into a distribution that never existed.
-             */
-            if (!labels_match(s, w)) continue;
+        for (int k = 0; k < w->n_terms; k++) {
+            term_rt_t *tm = &w->terms[k];
+            if (!tm->active) continue;
+
+            if (tm->q > 0.0f) {
+                if (s->role != PROM_ROLE_BUCKET) continue;
+                if (!base_is(s, tm->name, tm->name_len)) continue;
+                if (!term_matches(s, tm)) continue;
+                if (!prom_is_num(s->value)) continue;
+
+                double bound = prom_is_num(s->le) ? s->le.num
+                             : (s->le.kind == PVAL_POS_INF ? INFINITY : NAN);
+                if (isnan(bound)) continue;
+
+                /* Deduplicate by bound and SUM across matching series, so a
+                 * glob over several label sets yields their combined
+                 * distribution rather than whichever one came last. */
+                int slot = -1;
+                for (int b = 0; b < tm->nb; b++) {
+                    if (tm->le[b] == bound) { slot = b; break; }
+                }
+                if (slot < 0) {
+                    if (tm->nb >= TERM_MAX_BUCKETS) continue;
+                    slot = tm->nb++;
+                    tm->le[slot] = bound;
+                    tm->cum[slot] = 0;
+                }
+                tm->cum[slot] += s->value.num;
+                tm->seen = true;
+                continue;
+            }
+
+            if (!name_is(s, tm->name, tm->name_len)) continue;
+            if (!term_matches(s, tm)) continue;
             if (!prom_is_num(s->value)) continue;
 
-            watch_scratch_t *sc = &s_scratch[i];
-            double bound = prom_is_num(s->le) ? s->le.num
-                         : (s->le.kind == PVAL_POS_INF ? INFINITY : NAN);
-            if (isnan(bound)) continue;
+            /* Multi applies to the first term only: showing every series of
+             * a ratio's denominator separately is not a thing anyone means. */
+            if (w->multi && k == 0) {
+                char key[POLLER_CHILD_LABEL];
+                child_label_of(s, tm, key, sizeof(key));
+                int slot = -1;
+                for (int c = 0; c < w->sc_n_child; c++) {
+                    if (strcmp(w->sc_child_label[c], key) == 0) { slot = c; break; }
+                }
+                if (slot < 0) {
+                    w->sc_n_matched++;
+                    if (w->sc_n_child >= POLLER_MAX_CHILDREN) continue;
+                    slot = w->sc_n_child++;
+                    strncpy(w->sc_child_label[slot], key, POLLER_CHILD_LABEL - 1);
+                }
+                w->sc_child_value[slot] = s->value.num;
+                tm->seen = true;
+                continue;
+            }
 
-            /* Deduplicate by bound, last value wins: a buggy exporter that
-             * repeats a family would otherwise fill the array with duplicates
-             * until the real +Inf bucket no longer fits. */
-            int slot = -1;
-            for (int b = 0; b < sc->nb; b++) {
-                if (sc->le[b] == bound) { slot = b; break; }
-            }
-            if (slot < 0) {
-                if (sc->nb >= PROM_MAX_BUCKETS) continue;
-                slot = sc->nb++;
-                sc->le[slot] = bound;
-            }
-            sc->cum[slot] = s->value.num;
-            sc->seen = true;
-            continue;
+            term_accumulate(tm, s->value.num);
         }
-
-        /* The second operand is matched independently, so the two sides can
-         * be different label sets of the same metric or different metrics
-         * entirely. */
-        if (w->op != OP_NONE && w->name_b != NULL &&
-            name_is(s, w->name_b, w->name_b_len) &&
-            labels_match_n(s, w->labels_b, w->n_labels_b)) {
-            s_scratch[i].value_b = s->value;
-            s_scratch[i].seen_b  = true;
-        }
-
-        if (!name_is(s, w->name, w->name_len) || !labels_match(s, w)) continue;
-
-        if (w->multi) {
-            watch_scratch_t *sc = &s_scratch[i];
-            if (!prom_is_num(s->value)) continue;
-            char key[POLLER_CHILD_LABEL];
-            child_label_of(s, w, key, sizeof(key));
-
-            int slot = -1;
-            for (int k = 0; k < sc->n_child; k++) {
-                if (strcmp(sc->child_label[k], key) == 0) { slot = k; break; }
-            }
-            if (slot < 0) {
-                sc->n_matched++;
-                if (sc->n_child >= POLLER_MAX_CHILDREN) continue;
-                slot = sc->n_child++;
-                strncpy(sc->child_label[slot], key, POLLER_CHILD_LABEL - 1);
-            }
-            sc->child_value[slot] = s->value.num;
-            sc->seen = true;
-            continue;
-        }
-
-        s_scratch[i].value = s->value;
-        s_scratch[i].seen  = true;
     }
     return true;
 }
@@ -298,16 +284,120 @@ static bool feed_chunk(void *ctx, const char *data, size_t len)
 
 /* ------------------------------------------------------------- publishing */
 
+/*
+ * Reduce one term to a single number, applying its aggregation.
+ *
+ * Each term is rated independently, so rate(sum(x)) is what happens here --
+ * the reduction collapses the matching set first, then the rate is taken of
+ * that total. For counters that is the right order: summing rates and rating
+ * sums agree, but rating the sum survives a series appearing mid-window.
+ */
+static double term_value(term_rt_t *tm, int64_t t, bool *warming, bool *restarted)
+{
+    if (tm->q > 0.0f) {
+        if (tm->nb < 2) return NAN;
+
+        /* Sort by bound with +Inf last, then clamp: a scrape racing a
+         * concurrent observation can return non-monotonic counts, and the
+         * interpolation would divide by a negative denominator. */
+        for (int a = 1; a < tm->nb; a++) {
+            double kl = tm->le[a], kc = tm->cum[a];
+            int b = a - 1;
+            while (b >= 0 && tm->le[b] > kl) {
+                tm->le[b + 1] = tm->le[b];
+                tm->cum[b + 1] = tm->cum[b];
+                b--;
+            }
+            tm->le[b + 1] = kl; tm->cum[b + 1] = kc;
+        }
+        prom_hist_repair(tm->cum, tm->nb);
+
+        double use[TERM_MAX_BUCKETS];
+        bool   ready = true;
+
+        if (tm->window_s > 0) {
+            bool same = (tm->base_nb == tm->nb);
+            for (int b = 0; same && b < tm->nb; b++) {
+                if (tm->base_le[b] != tm->le[b]) same = false;
+            }
+            if (!same) {
+                ready = false;    /* bounds changed or first sight */
+            } else {
+                for (int b = 0; b < tm->nb; b++) {
+                    use[b] = tm->cum[b] - tm->base_cum[b];
+                    if (use[b] < 0) ready = false;   /* exporter restarted */
+                }
+                if (ready && use[tm->nb - 1] <= 0) ready = false;
+            }
+            if (!same || (t - tm->base_t) >= (int64_t)tm->window_s * 1000) {
+                memcpy(tm->base_cum, tm->cum, sizeof(double) * (size_t)tm->nb);
+                memcpy(tm->base_le,  tm->le,  sizeof(double) * (size_t)tm->nb);
+                tm->base_nb = tm->nb;
+                tm->base_t  = t;
+            }
+        } else {
+            memcpy(use, tm->cum, sizeof(double) * (size_t)tm->nb);
+        }
+
+        if (!ready) { *warming = true; return NAN; }
+        return prom_hist_quantile((double)tm->q, tm->le, use, tm->nb);
+    }
+
+    double v = term_reduced(tm);
+    if (!isfinite(v)) return NAN;
+
+    if (tm->agg != AGG_RATE) return v;
+
+    if (tm->window_s > 0) {
+        /* Windowed rate: difference against the oldest sample still inside
+         * the window, so a counter that only updates on its exporter's log
+         * interval reads steadily instead of alternating zero and spike. */
+        if (tm->win_n > 0 &&
+            v < tm->win_v[(tm->win_head + TERM_WIN_MAX - 1) % TERM_WIN_MAX]) {
+            tm->win_n = 0; tm->win_valid = false;
+            *restarted = true;
+        }
+        tm->win_v[tm->win_head] = v;
+        tm->win_t[tm->win_head] = t;
+        tm->win_head = (uint8_t)((tm->win_head + 1) % TERM_WIN_MAX);
+        if (tm->win_n < TERM_WIN_MAX) tm->win_n++;
+
+        int64_t cutoff = t - (int64_t)tm->window_s * 1000;
+        int best = -1;
+        for (int k = 0; k < tm->win_n; k++) {
+            uint8_t idx = (uint8_t)((tm->win_head + TERM_WIN_MAX - 1 - k) % TERM_WIN_MAX);
+            best = idx;
+            if (tm->win_t[idx] <= cutoff) break;
+        }
+        if (best >= 0) {
+            int64_t dt = t - tm->win_t[best];
+            /* Needs a real span before the number means anything. */
+            if (dt >= 2000) {
+                tm->win_last  = (float)((v - tm->win_v[best]) * 1000.0 / (double)dt);
+                tm->win_valid = true;
+            }
+        }
+        if (tm->win_valid) return tm->win_last;
+        *warming = true;
+        return NAN;
+    }
+
+    float r = 0;
+    rate_status_t rc = prom_rate_step(&tm->rate, prom_num(v), t,
+                                      (int64_t)s_interval_s * 3000, &r);
+    if (rc == RATE_OK)      return r;
+    if (rc == RATE_RESET)   { *restarted = true; return NAN; }
+    if (rc == RATE_WARMING) { *warming = true; }
+    return NAN;
+}
+
 static void publish(bool ok, const char *status, uint32_t latency_ms,
                     const prom_text_stats_t *st, uint64_t bytes)
 {
     /*
-     * Static, not a stack local.
-     *
-     * poller_snap_t carries every watch slot and grew to ~6KB when histogram
-     * buckets were added to each metric; this task has an 8KB stack. publish()
-     * is only ever called from the poller task, so a static is safe and costs
-     * nothing. The same growth caught dashboard_tick on the LVGL task.
+     * Static, not a stack local: poller_snap_t carries every watch slot and
+     * grew past this task's 8KB stack once already. publish() only ever runs
+     * on the poller task.
      */
     static poller_snap_t next;
     memset(&next, 0, sizeof(next));
@@ -321,98 +411,50 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
     int64_t t = now_ms();
 
     for (int i = 0; i < s_watch_n; i++) {
-        watch_rt_t      *w  = &s_watch[i];
-        watch_scratch_t *sc = &s_scratch[i];
-        poller_metric_t *m  = &next.m[i];
+        watch_rt_t      *w = &s_watch[i];
+        poller_metric_t *m = &next.m[i];
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;
 
-        if (!ok || !sc->seen) {
-            m->valid = false;
-            continue;
-        }
+        if (!ok) continue;
 
+        bool warming = false, restarted = false;
         double shown = NAN;
 
-        if (w->op != OP_NONE) {
-            /*
-             * Both operands go through the panel's aggregation before being
-             * combined. For counters that means ratio-of-rates, not
-             * ratio-of-totals -- a windowed hit rate rather than a lifetime
-             * one, which is what rate(a)/rate(a+b) means in PromQL and what
-             * anyone watching a panel actually wants.
-             */
-            double a = NAN, b = NAN;
-            if (w->agg == AGG_RATE) {
-                float ra = 0, rb = 0;
-                int64_t gap = (int64_t)s_interval_s * 3000;
-                if (sc->seen &&
-                    prom_rate_step(&w->rate, sc->value, t, gap, &ra) == RATE_OK) {
-                    a = ra;
-                }
-                if (sc->seen_b &&
-                    prom_rate_step(&w->rate_b, sc->value_b, t, gap, &rb) == RATE_OK) {
-                    b = rb;
-                }
-                if (!isfinite(a) || !isfinite(b)) m->warming = true;
-            } else {
-                if (sc->seen   && prom_is_num(sc->value))   a = sc->value.num;
-                if (sc->seen_b && prom_is_num(sc->value_b)) b = sc->value_b.num;
-            }
-
-            if (isfinite(a) && isfinite(b)) {
-                switch (w->op) {
-                case OP_SHARE: {
-                    double d = a + b;
-                    /* Both idle is not 0% -- it is "nothing happened", and a
-                     * hit rate that reads 0 when the server is quiet would be
-                     * read as a fault. */
-                    shown = (d != 0.0) ? a / d : NAN;
-                    break;
-                }
-                case OP_RATIO: shown = (b != 0.0) ? a / b : NAN; break;
-                case OP_DIFF:  shown = a - b; break;
-                case OP_SUM:   shown = a + b; break;
-                default:       shown = a;     break;
-                }
-            }
-        } else if (w->multi) {
-            /* Per-child baselines are keyed by label so a series appearing or
-             * disappearing between scrapes does not shift everyone else's
-             * rate onto the wrong history. */
-            for (int k = 0; k < sc->n_child; k++) {
+        if (w->multi && w->sc_n_child > 0) {
+            term_rt_t *t0 = &w->terms[0];
+            for (int k = 0; k < w->sc_n_child; k++) {
                 int slot = -1;
                 for (int j = 0; j < w->n_child; j++) {
-                    if (strcmp(w->child_key[j], sc->child_label[k]) == 0) {
+                    if (strcmp(w->child_key[j], w->sc_child_label[k]) == 0) {
                         slot = j; break;
                     }
                 }
                 if (slot < 0 && w->n_child < POLLER_MAX_CHILDREN) {
                     slot = w->n_child++;
-                    strncpy(w->child_key[slot], sc->child_label[k],
+                    strncpy(w->child_key[slot], w->sc_child_label[k],
                             POLLER_CHILD_LABEL - 1);
                 }
 
                 double cv = NAN;
-                if (w->agg == AGG_RATE && slot >= 0) {
+                if (t0->agg == AGG_RATE && slot >= 0) {
                     float r = 0;
-                    rate_status_t rc = prom_rate_step(&w->child_rate[slot],
-                                                      prom_num(sc->child_value[k]),
-                                                      t, (int64_t)s_interval_s * 3000,
-                                                      &r);
-                    if (rc == RATE_OK) cv = r;
+                    if (prom_rate_step(&w->child_rate[slot],
+                                       prom_num(w->sc_child_value[k]), t,
+                                       (int64_t)s_interval_s * 3000, &r) == RATE_OK) {
+                        cv = r;
+                    }
                 } else {
-                    cv = sc->child_value[k];
+                    cv = w->sc_child_value[k];
                 }
 
-                strncpy(m->child_label[k], sc->child_label[k],
+                strncpy(m->child_label[k], w->sc_child_label[k],
                         POLLER_CHILD_LABEL - 1);
                 m->child_value[k] = isfinite(cv) ? (float)cv : 0.0f;
                 if (isfinite(cv)) {
                     fmt_state_t fs = {0};
-                    char suf[12];
-                    bool numeric;
+                    char suf[12]; bool numeric;
                     ui_fmt_value(cv, w->fmt, w->unit, &fs,
                                  m->child_num[k], sizeof(m->child_num[k]),
                                  suf, sizeof(suf), &numeric);
@@ -420,14 +462,12 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                     strncpy(m->child_num[k], "--", sizeof(m->child_num[k]) - 1);
                 }
             }
-            m->n_children = sc->n_child;
-            m->n_matched  = sc->n_matched ? sc->n_matched : sc->n_child;
+            m->n_children = w->sc_n_child;
+            m->n_matched  = w->sc_n_matched ? w->sc_n_matched : w->sc_n_child;
 
-            /*
-             * Rank by value, but hold the order for about a minute.
-             * Re-sorting every poll makes rows leapfrog continuously, which is
-             * unreadable -- you cannot follow a row long enough to read it.
-             */
+            /* Rank by value but hold the order for about a minute: re-sorting
+             * every poll makes rows leapfrog and you cannot follow one long
+             * enough to read it. */
             if (w->resort_in == 0) {
                 for (int a = 1; a < m->n_children; a++) {
                     uint8_t keyi = (uint8_t)a;
@@ -448,90 +488,61 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 m->child_order[a] = w->order[a];
             }
 
-            /* The tile's headline value is the total across the children. */
             double sum = 0;
             for (int k = 0; k < m->n_children; k++) sum += m->child_value[k];
             shown = sum;
-        } else if (w->q > 0.0f) {
-            if (sc->nb >= 2) {
-                /* Sort by bound with +Inf last, then clamp: a scrape racing a
-                 * concurrent observation can return non-monotonic counts, and
-                 * the interpolation would divide by a negative denominator. */
-                for (int a = 1; a < sc->nb; a++) {
-                    double kl = sc->le[a], kc = sc->cum[a];
-                    int b = a - 1;
-                    while (b >= 0 && sc->le[b] > kl) {
-                        sc->le[b + 1] = sc->le[b];
-                        sc->cum[b + 1] = sc->cum[b];
-                        b--;
-                    }
-                    sc->le[b + 1] = kl; sc->cum[b + 1] = kc;
+        } else {
+            double v[CFG_MAX_TERMS];
+            for (int k = 0; k < w->n_terms; k++) {
+                v[k] = term_value(&w->terms[k], t, &warming, &restarted);
+            }
+
+            switch (w->op) {
+            case OP_SHARE: {
+                double d = v[0] + v[1];
+                /* Both idle is "nothing happened", not 0% -- a hit rate
+                 * reading zero on a quiet service would be read as a fault. */
+                shown = (isfinite(v[0]) && isfinite(v[1]) && d != 0.0)
+                      ? v[0] / d : NAN;
+                break;
+            }
+            case OP_RATIO:
+                shown = (isfinite(v[0]) && isfinite(v[1]) && v[1] != 0.0)
+                      ? v[0] / v[1] : NAN;
+                break;
+            case OP_DIFF:
+                shown = (isfinite(v[0]) && isfinite(v[1])) ? v[0] - v[1] : NAN;
+                break;
+            case OP_SUM: {
+                double acc = 0;
+                bool any = false;
+                for (int k = 0; k < w->n_terms; k++) {
+                    if (isfinite(v[k])) { acc += v[k]; any = true; }
                 }
-                prom_hist_repair(sc->cum, sc->nb);
+                shown = any ? acc : NAN;
+                break;
+            }
+            case OP_NONE:
+            default:
+                shown = v[0];
+                break;
+            }
 
-                /*
-                 * Difference against the baseline so the quantile describes
-                 * the last window_s of observations rather than the process's
-                 * whole life. window_s == 0 keeps the all-time behaviour.
-                 */
-                double use_cum[PROM_MAX_BUCKETS];
-                int    use_nb = sc->nb;
-                bool   ready  = true;
-
-                if (w->window_s > 0) {
-                    bool same = (w->base_nb == sc->nb);
-                    for (int b = 0; same && b < sc->nb; b++) {
-                        if (w->base_le[b] != sc->le[b]) same = false;
-                    }
-
-                    if (!same) {
-                        /* Bucket bounds changed (or first sight): re-baseline
-                         * and show nothing rather than differencing against a
-                         * distribution that no longer exists. */
-                        ready = false;
-                    } else {
-                        for (int b = 0; b < sc->nb; b++) {
-                            use_cum[b] = sc->cum[b] - w->base_cum[b];
-                            /* A negative delta means the exporter restarted;
-                             * the whole window is discarded rather than
-                             * producing a garbage quantile from it. */
-                            if (use_cum[b] < 0) ready = false;
-                        }
-                        if (ready && use_cum[use_nb - 1] <= 0) ready = false;
-                    }
-
-                    if (!same || (t - w->base_t) >= (int64_t)w->window_s * 1000) {
-                        memcpy(w->base_cum, sc->cum, sizeof(double) * sc->nb);
-                        memcpy(w->base_le,  sc->le,  sizeof(double) * sc->nb);
-                        w->base_nb = sc->nb;
-                        w->base_t  = t;
-                    }
-                } else {
-                    memcpy(use_cum, sc->cum, sizeof(double) * sc->nb);
-                }
-
-                if (!ready) {
-                    m->warming = true;
-                } else {
-                    shown  = prom_hist_quantile((double)w->q, sc->le, use_cum, use_nb);
-                    m->p50 = (float)prom_hist_quantile(0.50, sc->le, use_cum, use_nb);
-                    m->p90 = (float)prom_hist_quantile(0.90, sc->le, use_cum, use_nb);
-                    m->p99 = (float)prom_hist_quantile(0.99, sc->le, use_cum, use_nb);
-                }
-
-                double total = ready ? use_cum[use_nb - 1] : 0;
+            /* Histogram distribution, for the tile that draws one. */
+            term_rt_t *t0 = &w->terms[0];
+            if (w->op == OP_NONE && t0->q > 0.0f && t0->nb >= 2) {
+                m->p50 = (float)prom_hist_quantile(0.50, t0->le, t0->cum, t0->nb);
+                m->p90 = (float)prom_hist_quantile(0.90, t0->le, t0->cum, t0->nb);
+                m->p99 = (float)prom_hist_quantile(0.99, t0->le, t0->cum, t0->nb);
+                double total = t0->cum[t0->nb - 1];
                 if (total > 0) {
-                    /* Merge down to what a tile can actually draw: keep the
-                     * first N-1 bounds and lump everything above into the
-                     * last bar, which keeps the shares summing to 1. */
-                    int keep = sc->nb < POLLER_MAX_BUCKETS ? sc->nb
+                    int keep = t0->nb < POLLER_MAX_BUCKETS ? t0->nb
                                                            : POLLER_MAX_BUCKETS;
                     double prev = 0;
                     for (int b = 0; b < keep; b++) {
                         bool last = (b == keep - 1);
-                        double cum = last ? total : use_cum[b];
-                        m->bucket_le[b]    = last ? (float)INFINITY
-                                                  : (float)sc->le[b];
+                        double cum = last ? total : t0->cum[b];
+                        m->bucket_le[b]    = last ? (float)INFINITY : (float)t0->le[b];
                         m->bucket_share[b] = (float)((cum - prev) / total);
                         prev = cum;
                     }
@@ -539,95 +550,16 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                     m->has_hist  = true;
                 }
             }
-        } else if (w->agg == AGG_RATE && w->window_s > 0) {
-            /* Windowed rate: difference against the oldest sample still
-             * inside the window, so a stepped counter reads steadily. */
-            if (!prom_is_num(sc->value)) {
-                w->win_n = 0; w->win_valid = false;
-            } else {
-                double v = sc->value.num;
-
-                /* A counter that went backwards restarted; the ring describes
-                 * a series that no longer exists. */
-                if (w->win_n > 0 &&
-                    v < w->win_v[(w->win_head + RATE_WIN_MAX - 1) % RATE_WIN_MAX]) {
-                    w->win_n = 0; w->win_valid = false;
-                    m->restarted = true;
-                }
-
-                w->win_v[w->win_head] = v;
-                w->win_t[w->win_head] = t;
-                w->win_head = (uint8_t)((w->win_head + 1) % RATE_WIN_MAX);
-                if (w->win_n < RATE_WIN_MAX) w->win_n++;
-
-                int64_t cutoff = t - (int64_t)w->window_s * 1000;
-                int     best = -1;
-                for (int k = 0; k < w->win_n; k++) {
-                    uint8_t idx = (uint8_t)((w->win_head + RATE_WIN_MAX - 1 - k)
-                                            % RATE_WIN_MAX);
-                    best = idx;
-                    if (w->win_t[idx] <= cutoff) break;
-                }
-                if (best >= 0) {
-                    int64_t dt = t - w->win_t[best];
-                    /* Need a real span before the number means anything; below
-                     * that the tile says it is warming rather than showing a
-                     * rate derived from two adjacent samples. */
-                    if (dt >= 2000) {
-                        w->win_last  = (float)((v - w->win_v[best]) * 1000.0 / (double)dt);
-                        w->win_valid = true;
-                    }
-                }
-                if (w->win_valid) shown = w->win_last;
-                else              m->warming = true;
-            }
-        } else switch (w->agg) {
-        case AGG_LAST:
-            if (prom_is_num(sc->value)) shown = sc->value.num;
-            break;
-
-        case AGG_RATE: {
-            float rate = 0;
-            /* 3x the interval: past that, averaging across the gap produces a
-             * technically correct and deeply misleading number. */
-            rate_status_t rc = prom_rate_step(&w->rate, sc->value, t,
-                                              (int64_t)s_interval_s * 3000, &rate);
-            if (rc == RATE_OK) {
-                shown = rate;
-            } else if (rc == RATE_RESET) {
-                /*
-                 * Detected, flagged, but NOT displayed.
-                 *
-                 * Prometheus reset semantics are delta = v_now, which is right
-                 * for a query engine but wrong for a glanceable panel: a
-                 * counter that restarts at a large value yields one enormous
-                 * sample, and a single such point flattens an auto-scaled
-                 * chart's whole range for as long as it stays in the ring.
-                 * Measured at 2.24 TiB/s against a genuine 8 MiB/s baseline.
-                 *
-                 * Skipping the point costs the "served N since restart"
-                 * datum, which nobody reads off a sparkline, and leaves an
-                 * honest one-sample break instead.
-                 */
-                m->restarted = true;
-            } else if (rc == RATE_WARMING) {
-                m->warming = true;
-            }
-            break;
         }
 
-        default:
-            if (prom_is_num(sc->value)) shown = sc->value.num;
-            break;
-        }
+        m->warming   = warming;
+        m->restarted = restarted;
 
         if (isfinite(shown)) {
             bool numeric = true;
             ui_fmt_value(shown, w->fmt, w->unit, &w->fmt_state,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
-            /* Percent modes scale for display; charts and gauges want the
-             * same quantity the label shows, so they see the scaled one. */
             m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
                                               : (float)shown;
             m->numeric_only = numeric;
@@ -637,15 +569,14 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
     if (esp_log_level_get(TAG) >= ESP_LOG_INFO && ok) {
         char line[256]; size_t w = 0;
-        line[0] = '\0';          /* an empty watch list must not print the
-                                  * uninitialised buffer */
+        line[0] = '\0';
         for (int i = 0; i < s_watch_n && w < sizeof(line) - 1; i++) {
             const poller_metric_t *m = &next.m[i];
             int n = snprintf(line + w, sizeof(line) - w, "%s=%s%s%s  ",
                              m->label,
                              m->valid ? m->num
                                       : (m->restarted ? "restarted"
-                                                      : m->warming ? "warming" : "--"),
+                                         : m->warming ? "warming" : "--"),
                              m->valid && m->suffix[0] ? " " : "",
                              m->valid ? m->suffix : "");
             if (n < 0) break;
@@ -682,8 +613,14 @@ void poller_set_endpoint(const char *url, int interval_s)
     http_drop_slot(0);
     /* Rates measured against the old target are meaningless for the new one. */
     for (int i = 0; i < s_watch_n; i++) {
-        memset(&s_watch[i].rate, 0, sizeof(s_watch[i].rate));
-        memset(&s_watch[i].fmt_state, 0, sizeof(s_watch[i].fmt_state));
+        watch_rt_t *w = &s_watch[i];
+        memset(&w->fmt_state, 0, sizeof(w->fmt_state));
+        for (int k = 0; k < w->n_terms; k++) {
+            term_rt_t *tm = &w->terms[k];
+            memset(&tm->rate, 0, sizeof(tm->rate));
+            tm->win_n = tm->win_head = 0; tm->win_valid = false;
+            tm->base_nb = 0;
+        }
     }
     ESP_LOGI(TAG, "endpoint set to %s every %ds", url, s_interval_s);
 }
@@ -736,7 +673,16 @@ static void poller_task(void *arg)
             continue;
         }
 
-        memset(s_scratch, 0, sizeof(s_scratch));
+        /* Clear only the per-scrape accumulation; baselines and rings carry
+         * over, which is the whole point of them. */
+        for (int i = 0; i < s_watch_n; i++) {
+            watch_rt_t *w = &s_watch[i];
+            w->sc_n_child = w->sc_n_matched = 0;
+            for (int k = 0; k < w->n_terms; k++) {
+                term_rt_t *tm = &w->terms[k];
+                tm->acc = 0; tm->n_acc = 0; tm->seen = false; tm->nb = 0;
+            }
+        }
         prom_text_reset(parser);
 
         http_result_t res;
@@ -830,43 +776,54 @@ uint16_t poller_panel_id(int idx)
     return (idx >= 0 && idx < s_watch_n) ? s_watch[idx].panel_id : 0;
 }
 
+/* A label value containing '*' is matched as a glob rather than compared. */
+static bool selector_has_glob(const prom_label_t *l, uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        if (memchr(l[i].val, '*', l[i].val_len) != NULL) return true;
+    }
+    return false;
+}
+
 /*
  * Rebuild the watch list from the stored panels, preserving rate baselines
- * for selectors that survive the edit.
+ * for terms that survive the edit.
  *
  * Preserving them matters: without it, ticking one new metric would reset
  * every counter on the screen to "warming up" and blank the rates for a full
- * poll interval, which looks exactly like a fault.
+ * window, which looks exactly like a fault.
  */
 void poller_reload(void)
 {
     const config_t *c = config_get();
 
-    /*
-     * Preserve only what actually needs carrying across a reload.
-     *
-     * Copying the whole watch array would be ~10KB of stack -- each entry
-     * holds a 160-byte selector scratch plus its parsed labels -- and this
-     * runs on app_main's 8KB stack at boot and on the LVGL task's 6KB stack
-     * when a selection changes. Both overflow. The baselines are 32 bytes an
-     * entry.
-     */
-    struct { uint16_t id; rate_state_t rate, rate_b; fmt_state_t fmt; }
+    if (s_watch == NULL) {
+        s_watch = heap_caps_calloc(POLLER_MAX_WATCH, sizeof(watch_rt_t),
+                                   MALLOC_CAP_SPIRAM);
+        if (s_watch == NULL) {
+            ESP_LOGE(TAG, "cannot allocate the watch list");
+            s_watch_n = 0;
+            return;
+        }
+    }
+
+    /* Carry only the baselines: copying whole watches would be tens of KB on
+     * whichever stack called us. */
+    struct { uint16_t id; rate_state_t rate[CFG_MAX_TERMS]; fmt_state_t fmt; }
         prev[POLLER_MAX_WATCH];
     int prev_n = s_watch_n;
     for (int i = 0; i < prev_n; i++) {
-        prev[i].id     = s_watch[i].panel_id;
-        prev[i].rate   = s_watch[i].rate;
-        prev[i].rate_b = s_watch[i].rate_b;
-        prev[i].fmt    = s_watch[i].fmt_state;
+        prev[i].id  = s_watch[i].panel_id;
+        prev[i].fmt = s_watch[i].fmt_state;
+        for (int k = 0; k < CFG_MAX_TERMS; k++) prev[i].rate[k] = s_watch[i].terms[k].rate;
     }
 
-    memset(s_watch, 0, sizeof(s_watch));
+    memset(s_watch, 0, sizeof(watch_rt_t) * POLLER_MAX_WATCH);
     s_watch_n = 0;
 
     for (int i = 0; i < c->n_panels && s_watch_n < POLLER_MAX_WATCH; i++) {
         const cfg_panel_t *p = &c->panels[i];
-        if (p->sel[0] == '\0') continue;
+        if (p->n_terms == 0 || p->terms[0].sel[0] == '\0') continue;
         /* Must use the SAME predicate as the dashboard's tile builder: slot i
          * here is tile i there, and a mismatch silently pairs a tile with
          * another metric's numbers. */
@@ -874,60 +831,59 @@ void poller_reload(void)
 
         watch_rt_t *w = &s_watch[s_watch_n];
         w->panel_id = p->id;
-        w->agg      = p->agg;
-        w->fmt      = p->fmt;
-        w->q        = p->q;
-        w->window_s = p->window_s;
-        w->multi    = p->multi;
         w->op       = p->op;
-        if (w->op != OP_NONE && p->sel_b[0]) {
-            strncpy(w->scratch_b, p->sel_b, sizeof(w->scratch_b) - 1);
-            if (!prom_parse_selector(w->scratch_b, w->scratch_b,
-                                     sizeof(w->scratch_b),
-                                     &w->name_b, &w->name_b_len,
-                                     w->labels_b, 8, &w->n_labels_b)) {
-                ESP_LOGW(TAG, "unparseable second operand: %s", p->sel_b);
-                w->op = OP_NONE;
-            }
-        } else if (w->op != OP_NONE) {
-            w->op = OP_NONE;      /* an operator with nothing to operate on */
-        }
+        w->multi    = p->multi;
+        w->fmt      = p->fmt;
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
-        strncpy(w->scratch, p->sel, sizeof(w->scratch) - 1);
 
-        if (!prom_parse_selector(w->scratch, w->scratch, sizeof(w->scratch),
-                                 &w->name, &w->name_len,
-                                 w->labels, 8, &w->n_labels)) {
-            ESP_LOGW(TAG, "unparseable selector, skipping: %s", p->sel);
-            continue;
+        bool bad = false;
+        for (int k = 0; k < p->n_terms && k < CFG_MAX_TERMS; k++) {
+            const cfg_term_t *ct = &p->terms[k];
+            if (ct->sel[0] == '\0') continue;
+            term_rt_t *tm = &w->terms[w->n_terms];
+            tm->reduce   = ct->reduce;
+            tm->agg      = ct->agg;
+            tm->window_s = ct->window_s;
+            tm->q        = ct->q;
+            strncpy(tm->scratch, ct->sel, sizeof(tm->scratch) - 1);
+            if (!prom_parse_selector(tm->scratch, tm->scratch, sizeof(tm->scratch),
+                                     &tm->name, &tm->name_len,
+                                     tm->labels, 8, &tm->n_labels)) {
+                ESP_LOGW(TAG, "unparseable selector, skipping panel: %s", ct->sel);
+                bad = true;
+                break;
+            }
+            tm->has_glob = selector_has_glob(tm->labels, tm->n_labels);
+            tm->active   = true;
+            w->n_terms++;
         }
+        if (bad || w->n_terms == 0) { memset(w, 0, sizeof(*w)); continue; }
 
-        /* A blank title falls back to the metric name rather than showing an
-         * empty tile -- the name is always better than nothing. */
+        /* An operator with only one operand is not an operator. */
+        if (w->op != OP_NONE && w->n_terms < 2) w->op = OP_NONE;
+
         if (p->title[0]) {
             strncpy(w->label, p->title, sizeof(w->label) - 1);
         } else {
-            size_t n = w->name_len < sizeof(w->label) - 1 ? w->name_len
-                                                          : sizeof(w->label) - 1;
-            memcpy(w->label, w->name, n);
+            size_t n = w->terms[0].name_len < sizeof(w->label) - 1
+                     ? w->terms[0].name_len : sizeof(w->label) - 1;
+            memcpy(w->label, w->terms[0].name, n);
             w->label[n] = '\0';
         }
 
         for (int j = 0; j < prev_n; j++) {
-            if (prev[j].id == w->panel_id) {
-                w->rate      = prev[j].rate;
-                w->rate_b    = prev[j].rate_b;
-                w->fmt_state = prev[j].fmt;
-                break;
-            }
+            if (prev[j].id != w->panel_id) continue;
+            w->fmt_state = prev[j].fmt;
+            for (int k = 0; k < w->n_terms; k++) w->terms[k].rate = prev[j].rate[k];
+            break;
         }
 
-        w->active = true;
         s_watch_n++;
     }
 
-    ESP_LOGI(TAG, "watching %d series", s_watch_n);
+    ESP_LOGI(TAG, "watching %d panels", s_watch_n);
 }
+
 
 uint32_t poller_generation(void)
 {

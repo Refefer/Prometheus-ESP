@@ -93,12 +93,13 @@ static void refresh(void)
      * combine it with a second series. The two sets share the row rather than
      * making the sheet taller than the screen.
      */
-    bool hist = (p->q > 0.0f);
+    cfg_term_t *t0 = config_term0(p);
+    bool hist = (t0->q > 0.0f);
     /* A windowed rate matters for any counter, not just histograms: an
      * exporter that updates on a log interval steps rather than flows, and
      * polled faster than it updates the raw rate alternates between zero and
      * a spike. */
-    bool windowed = hist || (p->agg == AGG_RATE);
+    bool windowed = hist || (t0->agg == AGG_RATE);
     for (int i = 0; i < 3; i++) hidden_if_changed(s_q_btn[i], !hist);
     for (int i = 0; i < 4; i++) hidden_if_changed(s_win_btn[i], !windowed);
     hidden_if_changed(s_q_cap, !hist);
@@ -109,13 +110,13 @@ static void refresh(void)
     hidden_if_changed(s_selb_btn, windowed);
 
     for (int i = 0; i < 3; i++) {
-        bool on = (fabsf(p->q - k_quants[i].q) < 0.001f);
+        bool on = (fabsf(t0->q - k_quants[i].q) < 0.001f);
         bg_color_if_changed(s_q_btn[i], on ? COL_ACCENT : COL_PANEL);
         lv_obj_t *l = lv_obj_get_child(s_q_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
     }
     for (int i = 0; i < 4; i++) {
-        bool on = (p->window_s == k_windows[i].s);
+        bool on = (t0->window_s == k_windows[i].s);
         bg_color_if_changed(s_win_btn[i], on ? COL_ACCENT : COL_PANEL);
         lv_obj_t *l = lv_obj_get_child(s_win_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
@@ -127,13 +128,13 @@ static void refresh(void)
         lv_obj_t *l = lv_obj_get_child(s_op_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
     }
+    bool have_b = (p->n_terms > 1 && p->terms[1].sel[0]);
     label_set_if_changed(s_selb_lbl,
                          p->op == OP_NONE ? "(not used)"
-                         : p->sel_b[0]    ? p->sel_b
+                         : have_b         ? p->terms[1].sel
                                           : "tap to choose the other series");
     text_color_if_changed(s_selb_lbl,
-                          (p->op != OP_NONE && !p->sel_b[0]) ? COL_WARN
-                                                             : COL_TEXT);
+                          (p->op != OP_NONE && !have_b) ? COL_WARN : COL_TEXT);
 
     label_set_if_changed(s_multi_lbl, p->multi ? "all series" : "one series");
     label_set_if_changed(s_title_lbl, p->title[0] ? p->title : "(metric name)");
@@ -215,8 +216,14 @@ static void selb_chosen(const char *sel)
 {
     cfg_panel_t *p = panel();
     if (p == NULL || sel == NULL) { refresh(); return; }
-    strncpy(p->sel_b, sel, sizeof(p->sel_b) - 1);
-    p->sel_b[sizeof(p->sel_b) - 1] = '\0';
+    if (p->n_terms < 2) {
+        /* The second operand inherits the first's aggregation, which is what
+         * makes a ratio of rates rather than a rate divided by a total. */
+        p->terms[1] = p->terms[0];
+        p->n_terms = 2;
+    }
+    strncpy(p->terms[1].sel, sel, sizeof(p->terms[1].sel) - 1);
+    p->terms[1].sel[sizeof(p->terms[1].sel) - 1] = '\0';
     config_touch();
     refresh();
 }
@@ -236,7 +243,7 @@ static void q_cb(lv_event_t *e)
 {
     cfg_panel_t *p = panel();
     if (p == NULL) return;
-    p->q = k_quants[(int)(intptr_t)lv_event_get_user_data(e)].q;
+    config_term0(p)->q = k_quants[(int)(intptr_t)lv_event_get_user_data(e)].q;
     config_touch();
     refresh();
 }
@@ -245,7 +252,10 @@ static void win_cb(lv_event_t *e)
 {
     cfg_panel_t *p = panel();
     if (p == NULL) return;
-    p->window_s = k_windows[(int)(intptr_t)lv_event_get_user_data(e)].s;
+    uint16_t w = k_windows[(int)(intptr_t)lv_event_get_user_data(e)].s;
+    /* Both operands share the window: two sides of a ratio measured over
+     * different spans is almost always a mistake rather than an intention. */
+    for (int i = 0; i < p->n_terms; i++) p->terms[i].window_s = w;
     config_touch();
     refresh();
 }
@@ -262,6 +272,7 @@ static void op_cb(lv_event_t *e)
      * what the number means, and leaving it as raw SI would show 0.972 where
      * the reader wants 97%.
      */
+    if (p->op == OP_NONE) p->n_terms = 1;
     if (p->op == OP_SHARE) {
         p->fmt  = FMT_PCT_01;
         p->vmin = 0.0f;

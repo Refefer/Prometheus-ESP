@@ -347,14 +347,19 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
     if (p == NULL) return 0;
 
     p->ep_id = ep_id();
-    strncpy(p->sel, e->sel[0] ? e->sel : e->name, sizeof(p->sel) - 1);
+    cfg_term_t *t0 = config_term0(p);
+    strncpy(t0->sel, e->sel[0] ? e->sel : e->name, sizeof(t0->sel) - 1);
+    /* A selector chosen from the browser names ONE label set, so summing over
+     * the match set and taking the first are the same thing -- but sum is the
+     * right default for a selector later widened with a glob. */
+    t0->reduce = RED_SUM;
 
     fmt_mode_t fmt = FMT_SI;
     agg_mode_t agg = AGG_LAST;
     ui_fmt_infer(e->name, strlen(e->name), (int)e->type,
                  &fmt, p->unit, sizeof(p->unit), &agg);
-    p->fmt = fmt;
-    p->agg = agg;
+    p->fmt    = fmt;
+    t0->agg   = (uint8_t)agg;
 
     switch (e->type) {
     case PROM_TYPE_HISTOGRAM:
@@ -368,8 +373,8 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
          * q is still set because the renderer falls back to a plain quantile
          * when the tile is too small for bars.
          */
-        p->q        = 0.99f;
-        p->window_s = 300;      /* 5 minutes; all-time stops moving */
+        t0->q        = 0.99f;
+        t0->window_s = 300;     /* 5 minutes; all-time stops moving */
         p->kind = TILE_HIST;
         p->w    = 2;
         p->h    = 2;
@@ -379,7 +384,7 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
         /* Smooth over a minute by default. Exporters that update on a log
          * interval step rather than flow, and a one-poll rate on those
          * alternates between zero and a spike. */
-        p->window_s = 60;
+        t0->window_s = 60;
         break;
     default:
         p->kind = (fmt == FMT_PCT_01 || fmt == FMT_PCT_100) ? TILE_GAUGE
@@ -392,7 +397,7 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
     }
 
     /* A quantile panel shows a duration; the family name says seconds. */
-    if (p->q > 0.0f && fmt == FMT_DURATION) p->fmt = FMT_DURATION;
+    if (t0->q > 0.0f && fmt == FMT_DURATION) p->fmt = FMT_DURATION;
 
     size_t n = strlen(e->name);
     const char *shortname = e->name;
@@ -400,6 +405,7 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
     const char *colon = strchr(e->name, ':');
     if (colon && colon[1]) { shortname = colon + 1; n = strlen(shortname); }
     strncpy(p->title, shortname, sizeof(p->title) - 1);
+    strncpy(p->sel, t0->sel, sizeof(p->sel) - 1);
     (void)n;
 
     if (at_cell) {

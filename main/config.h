@@ -19,7 +19,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CFG_SCHEMA_VERSION   1
+#define CFG_SCHEMA_VERSION   2
+#define CFG_MAX_TERMS        4
 #define CFG_MAX_ENDPOINTS    8
 /* A screen holds twelve 1x1 cells, so it cannot show more than twelve panels.
  * Keeping the cap at the real limit matters: poller_snap_t carries every slot
@@ -41,6 +42,39 @@ typedef enum { EP_TEXT = 0, EP_PROMAPI } ep_kind_t;
  * every ratio anyone puts on a panel, and each is one tap to choose rather
  * than a formula to type on a touchscreen.
  */
+/*
+ * How the several series a term matches collapse into one number.
+ *
+ * This is the "sum by()" of the config: a term selects a set with its
+ * selector (label values may be globs) and a reducer turns that set into a
+ * scalar. RED_FIRST preserves the old behaviour of binding to whichever
+ * series appeared first, which is occasionally what you want and is never
+ * what you want by accident.
+ */
+typedef enum {
+    RED_SUM = 0,
+    RED_AVG,
+    RED_MIN,
+    RED_MAX,
+    RED_COUNT,
+    RED_FIRST,
+} reduce_t;
+
+/*
+ * One operand of a panel.
+ *
+ * Each term is independently aggregated and independently rated, so
+ * rate(sum(a)) and sum(rate(a)) are both expressible and the panel's two
+ * sides can use different windows if that is genuinely what is meant.
+ */
+typedef struct {
+    char      sel[CFG_SEL_MAX];  /* metric{label="value"}; * in a value globs */
+    uint8_t   reduce;            /* reduce_t */
+    uint8_t   agg;               /* agg_mode_t: AGG_LAST or AGG_RATE */
+    uint16_t  window_s;          /* 0 = one poll interval (or all-time for q) */
+    float     q;                 /* >0: histogram quantile instead of a value */
+} cfg_term_t;
+
 typedef enum {
     OP_NONE = 0,   /* single series */
     OP_SHARE,      /* a / (a+b)  -- cache hit rate, error rate */
@@ -65,26 +99,22 @@ typedef struct {
 typedef struct {
     uint16_t    id;
     uint16_t    ep_id;
-    char        sel[CFG_SEL_MAX];    /* name{label="value",...} */
-    char        sel_b[CFG_SEL_MAX];  /* the other operand, when op != OP_NONE */
+    /*
+     * Operands. A plain panel has one term; a derived panel has two and an
+     * op. Schema 1 carried sel/sel_b/op/q/agg/window_s directly on the panel
+     * and is migrated into this shape on load.
+     */
+    cfg_term_t  terms[CFG_MAX_TERMS];
+    uint8_t     n_terms;
     panel_op_t  op;
+
+    /* Mirrors terms[0] so the touch UI and the browser can keep working in
+     * terms of "the panel's metric" without unpacking the array. */
+    char        sel[CFG_SEL_MAX];
     char        title[CFG_TITLE_MAX];/* "" => derive from the metric name */
     tile_kind_t kind;
     fmt_mode_t  fmt;
-    agg_mode_t  agg;
     char        unit[8];
-    float       q;                   /* quantile for histogram/summary panels,
-                                      * 0 => not a quantile panel */
-    /*
-     * Seconds of observations the quantile is taken over. 0 means all-time:
-     * every observation since the exporter's process started.
-     *
-     * All-time is almost never what a panel wants. A long-lived process
-     * accumulates enough history that one bad afternoon is permanently baked
-     * in -- measured on a real inference server, the all-time p99 read 72s
-     * while the last 30 seconds of traffic were at 0.6s.
-     */
-    uint16_t    window_s;
     float       vmin, vmax;          /* NAN => auto */
     float       warn, crit;          /* NAN => no threshold */
     bool        lower_is_worse;
@@ -146,6 +176,13 @@ esp_err_t config_flush_sync(void);
 
 /* True when the last load fell back to defaults. */
 bool config_was_reset(void);
+
+/*
+ * terms[0], created if the panel has none. Every panel has at least one term,
+ * so the UI can treat this as "the panel's metric" without unpacking the
+ * array -- and a pushed config with four terms still works underneath it.
+ */
+cfg_term_t *config_term0(cfg_panel_t *p);
 
 cfg_panel_t *config_panel_add(void);
 void         config_panel_remove(uint16_t id);
