@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *TAG = "config";
@@ -142,6 +144,64 @@ static void write_float(FILE *f, float v)
     else          fprintf(f, "%.6g", (double)v);
 }
 
+/* The presentation half -- screens and panels -- shared by config.json and
+ * every layout file, so the two can never drift apart. */
+static void write_presentation(FILE *f)
+{
+    fputs("  \"screens\": [\n", f);
+    for (int i = 0; i < s_cfg.n_screens; i++) {
+        fputs("    { \"title\": ", f);
+        write_escaped(f, s_cfg.screens[i].title);
+        fprintf(f, ", \"pinned\": %s }%s\n",
+                s_cfg.screens[i].pinned ? "true" : "false",
+                i + 1 < s_cfg.n_screens ? "," : "");
+    }
+    fputs("  ],\n", f);
+
+    fputs("  \"panels\": [\n", f);
+    for (int i = 0; i < s_cfg.n_panels; i++) {
+        const cfg_panel_t *p = &s_cfg.panels[i];
+        fprintf(f, "    { \"id\": %u, \"ep\": %u", (unsigned)p->id,
+                (unsigned)p->ep_id);
+        fputs(", \"title\": ", f);
+        write_escaped(f, p->title);
+        fputs(", \"unit\": ", f);
+        write_escaped(f, p->unit);
+        fputs(", \"kind\": ", f);  write_escaped(f, enum_to_name(k_kinds, p->kind));
+        fputs(", \"fmt\": ", f);   write_escaped(f, enum_to_name(k_fmts, p->fmt));
+        fputs(", \"op\": ", f);    write_escaped(f, enum_to_name(k_ops, p->op));
+
+        fputs(", \"terms\": [", f);
+        for (int k = 0; k < p->n_terms; k++) {
+            const cfg_term_t *tm = &p->terms[k];
+            if (k) fputs(", ", f);
+            fputs("{ \"sel\": ", f);
+            write_escaped(f, tm->sel);
+            fputs(", \"reduce\": ", f);
+            write_escaped(f, enum_to_name(k_reduces, tm->reduce));
+            fputs(", \"agg\": ", f);
+            write_escaped(f, enum_to_name(k_aggs, tm->agg));
+            fprintf(f, ", \"window_s\": %u", (unsigned)tm->window_s);
+            fputs(", \"q\": ", f); write_float(f, tm->q);
+            fputs(" }", f);
+        }
+        fputs("]", f);
+
+        fputs(", \"vmin\": ", f); write_float(f, p->vmin);
+        fputs(", \"vmax\": ", f); write_float(f, p->vmax);
+        fputs(", \"warn\": ", f); write_float(f, p->warn);
+        fputs(", \"crit\": ", f); write_float(f, p->crit);
+        fprintf(f, ", \"multi\": %s", p->multi ? "true" : "false");
+        fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
+                   " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
+                p->lower_is_worse ? "true" : "false",
+                (unsigned)p->screen, (unsigned)p->col, (unsigned)p->row,
+                (unsigned)p->w, (unsigned)p->h,
+                i + 1 < s_cfg.n_panels ? "," : "");
+    }
+    fputs("  ]\n", f);
+}
+
 static esp_err_t write_config(const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -152,6 +212,9 @@ static esp_err_t write_config(const char *path)
 
     fprintf(f, "{\n  \"schema\": %u,\n", (unsigned)s_cfg.schema);
     fprintf(f, "  \"next_id\": %u,\n", (unsigned)s_cfg.next_id);
+    fputs("  \"active_layout\": ", f);
+    write_escaped(f, s_cfg.active_layout);
+    fputs(",\n", f);
 
     fputs("  \"device\": { \"theme\": ", f);
     write_escaped(f, s_cfg.device.theme);
@@ -179,61 +242,11 @@ static esp_err_t write_config(const char *path)
     }
     fputs("  ],\n", f);
 
-    fputs("  \"screens\": [\n", f);
-    for (int i = 0; i < s_cfg.n_screens; i++) {
-        fputs("    { \"title\": ", f);
-        write_escaped(f, s_cfg.screens[i].title);
-        fprintf(f, ", \"pinned\": %s }%s\n",
-                s_cfg.screens[i].pinned ? "true" : "false",
-                i + 1 < s_cfg.n_screens ? "," : "");
-    }
-    fputs("  ],\n", f);
+    write_presentation(f);
+    fputs("}\n", f);
 
-    fputs("  \"panels\": [\n", f);
-    for (int i = 0; i < s_cfg.n_panels; i++) {
-        const cfg_panel_t *p = &s_cfg.panels[i];
-        fprintf(f, "    { \"id\": %u, \"ep\": %u, \"sel\": ",
-                (unsigned)p->id, (unsigned)p->ep_id);
-        write_escaped(f, p->sel);
-        fputs(", \"op\": ", f); write_escaped(f, enum_to_name(k_ops, p->op));
-        fputs(", \"title\": ", f);
-        write_escaped(f, p->title);
-        fputs(", \"unit\": ", f);
-        write_escaped(f, p->unit);
-        fputs(", \"kind\": ", f);  write_escaped(f, enum_to_name(k_kinds, p->kind));
-        fputs(", \"fmt\": ", f);   write_escaped(f, enum_to_name(k_fmts, p->fmt));
-
-        fputs(", \"terms\": [", f);
-        for (int k = 0; k < p->n_terms; k++) {
-            const cfg_term_t *tm = &p->terms[k];
-            if (k) fputs(", ", f);
-            fputs("{ \"sel\": ", f);
-            write_escaped(f, tm->sel);
-            fputs(", \"reduce\": ", f);
-            write_escaped(f, enum_to_name(k_reduces, tm->reduce));
-            fputs(", \"agg\": ", f);
-            write_escaped(f, enum_to_name(k_aggs, tm->agg));
-            fprintf(f, ", \"window_s\": %u", (unsigned)tm->window_s);
-            fputs(", \"q\": ", f); write_float(f, tm->q);
-            fputs(" }", f);
-        }
-        fputs("]", f);
-        fputs(", \"vmin\": ", f); write_float(f, p->vmin);
-        fputs(", \"vmax\": ", f); write_float(f, p->vmax);
-        fputs(", \"warn\": ", f); write_float(f, p->warn);
-        fputs(", \"crit\": ", f); write_float(f, p->crit);
-        fprintf(f, ", \"multi\": %s", p->multi ? "true" : "false");
-        fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
-                   " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
-                p->lower_is_worse ? "true" : "false",
-                (unsigned)p->screen, (unsigned)p->col, (unsigned)p->row,
-                (unsigned)p->w, (unsigned)p->h,
-                i + 1 < s_cfg.n_panels ? "," : "");
-    }
-    fputs("  ]\n}\n", f);
-
-    /* fflush + fsync before close: rename is only atomic with respect to
-     * data that has actually reached the medium. */
+    /* fflush + fsync before close: rename is only atomic with respect to data
+     * that has actually reached the medium. */
     if (fflush(f) != 0) { fclose(f); return ESP_FAIL; }
     fsync(fileno(f));
     fclose(f);
@@ -331,24 +344,34 @@ static float get_float(const cJSON *o, const char *k)
     return cJSON_IsNumber(v) ? (float)v->valuedouble : NAN;  /* null => unset */
 }
 
-static bool parse_into(config_t *cfg, const char *json, size_t len)
+/*
+ * `full` distinguishes a complete configuration from a layout document.
+ *
+ * A layout carries only screens and panels, so it is parsed over a copy of
+ * the live config: whatever it omits keeps its current value, and switching
+ * layouts cannot silently drop the endpoint being polled.
+ */
+static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full)
 {
     cJSON *root = cJSON_ParseWithLength(json, len);
     if (root == NULL) return false;
 
-    int schema = get_int(root, "schema", 0);
-    if (schema < 1 || schema > CFG_SCHEMA_VERSION) {
-        ESP_LOGW(TAG, "schema %d is not readable by this build (max %d)",
-                 schema, CFG_SCHEMA_VERSION);
-        cJSON_Delete(root);
-        return false;
+    if (full) {
+        int schema = get_int(root, "schema", 0);
+        if (schema < 1 || schema > CFG_SCHEMA_VERSION) {
+            ESP_LOGW(TAG, "schema %d is not readable by this build (max %d)",
+                     schema, CFG_SCHEMA_VERSION);
+            cJSON_Delete(root);
+            return false;
+        }
+        set_defaults_into(cfg);
+        cfg->schema  = (uint16_t)schema;
+        cfg->next_id = (uint16_t)get_int(root, "next_id", 1);
+        get_str(root, "active_layout", cfg->active_layout,
+                sizeof(cfg->active_layout));
     }
 
-    set_defaults_into(cfg);
-    cfg->schema  = (uint16_t)schema;
-    cfg->next_id = (uint16_t)get_int(root, "next_id", 1);
-
-    const cJSON *d = cJSON_GetObjectItem(root, "device");
+    const cJSON *d = full ? cJSON_GetObjectItem(root, "device") : NULL;
     if (cJSON_IsObject(d)) {
         get_str(d, "theme", cfg->device.theme, sizeof(cfg->device.theme));
         cfg->device.poll_default_s = (uint16_t)get_int(d, "poll_default_s", 10);
@@ -356,7 +379,8 @@ static bool parse_into(config_t *cfg, const char *json, size_t len)
         cfg->device.rotate_dwell_s = (uint16_t)get_int(d, "rotate_dwell_s", 20);
     }
 
-    const cJSON *arr = cJSON_GetObjectItem(root, "endpoints"), *it = NULL;
+    const cJSON *arr = full ? cJSON_GetObjectItem(root, "endpoints") : NULL;
+    const cJSON *it = NULL;
     if (cJSON_IsArray(arr)) {
         cJSON_ArrayForEach(it, arr) {
             if (cfg->n_endpoints >= CFG_MAX_ENDPOINTS) break;
@@ -463,6 +487,16 @@ static bool parse_into(config_t *cfg, const char *json, size_t len)
 
     cJSON_Delete(root);
     return true;
+}
+
+static bool parse_into(config_t *cfg, const char *json, size_t len)
+{
+    return parse_into_ex(cfg, json, len, true);
+}
+
+static bool parse_into_partial(config_t *cfg, const char *json, size_t len)
+{
+    return parse_into_ex(cfg, json, len, false);
 }
 
 static bool load_file(const char *path)
@@ -616,6 +650,212 @@ esp_err_t config_apply_json(const char *json, size_t len, char *err, size_t cap)
 
     config_touch();
     config_flush();
+    return ESP_OK;
+}
+
+void config_enum_values(const char *which, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) return;
+    out[0] = '\0';
+    const enum_name_t *tab =
+        strcmp(which, "kind")   == 0 ? k_kinds   :
+        strcmp(which, "fmt")    == 0 ? k_fmts    :
+        strcmp(which, "reduce") == 0 ? k_reduces :
+        strcmp(which, "agg")    == 0 ? k_aggs    :
+        strcmp(which, "op")     == 0 ? k_ops     : NULL;
+    if (tab == NULL) return;
+
+    size_t w = 0;
+    for (int i = 0; tab[i].name && w < cap - 24; i++) {
+        w += (size_t)snprintf(out + w, cap - w, "%s\"%s\"", i ? "," : "",
+                              tab[i].name);
+    }
+}
+
+/* ---------------------------------------------------------------- layouts */
+
+#define LAYOUT_DIR STORAGE_CFG_PATH "/layouts"
+
+/*
+ * Layout names become filenames, so they are restricted to characters that
+ * cannot escape the directory or confuse the filesystem. Rejecting here beats
+ * sanitising: a name that silently becomes a different name is worse than one
+ * that is refused.
+ */
+static bool layout_name_ok(const char *name)
+{
+    if (name == NULL || name[0] == '\0') return false;
+    size_t n = strlen(name);
+    if (n >= CFG_LAYOUT_NAME_MAX - 6) return false;   /* room for ".json" */
+    for (size_t i = 0; i < n; i++) {
+        char c = name[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static void layout_path(const char *name, char *out, size_t cap)
+{
+    snprintf(out, cap, LAYOUT_DIR "/%s.json", name);
+}
+
+const char *config_active_layout(void) { return s_cfg.active_layout; }
+
+int config_layout_list(char names[][CFG_LAYOUT_NAME_MAX], int max)
+{
+    DIR *d = opendir(LAYOUT_DIR);
+    if (d == NULL) return 0;
+
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < max) {
+        const char *dot = strrchr(e->d_name, '.');
+        if (dot == NULL || strcmp(dot, ".json") != 0) continue;
+        size_t len = (size_t)(dot - e->d_name);
+        if (len == 0 || len >= CFG_LAYOUT_NAME_MAX) continue;
+        memcpy(names[n], e->d_name, len);
+        names[n][len] = '\0';
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+bool config_layout_write_json(const char *name, FILE *f)
+{
+    if (name == NULL) {              /* the live screens and panels */
+        fputs("{\n", f);
+        write_presentation(f);
+        fputs("}\n", f);
+        return true;
+    }
+    if (!layout_name_ok(name)) return false;
+
+    char path[96];
+    layout_path(name, path, sizeof(path));
+    FILE *in = fopen(path, "rb");
+    if (in == NULL) return false;
+
+    char buf[512];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, got, f);
+    fclose(in);
+    return true;
+}
+
+esp_err_t config_layout_save(const char *name)
+{
+    if (!layout_name_ok(name)) return ESP_ERR_INVALID_ARG;
+    if (!storage_cfg_ready()) return ESP_ERR_INVALID_STATE;
+
+    mkdir(LAYOUT_DIR, 0777);          /* harmless if it already exists */
+
+    char path[96], tmp[96];
+    layout_path(name, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), LAYOUT_DIR "/.tmp.json");
+
+    FILE *f = fopen(tmp, "wb");
+    if (f == NULL) return ESP_FAIL;
+    fputs("{\n", f);
+    write_presentation(f);
+    fputs("}\n", f);
+    if (fflush(f) != 0) { fclose(f); remove(tmp); return ESP_FAIL; }
+    fsync(fileno(f));
+    fclose(f);
+
+    /* Same atomic-rename discipline as the main config: a power cut leaves
+     * either the old layout or the new one. */
+    if (rename(tmp, path) != 0) { remove(tmp); return ESP_FAIL; }
+
+    strncpy(s_cfg.active_layout, name, sizeof(s_cfg.active_layout) - 1);
+    config_touch();
+    ESP_LOGI(TAG, "saved layout '%s'", name);
+    return ESP_OK;
+}
+
+esp_err_t config_layout_delete(const char *name)
+{
+    if (!layout_name_ok(name)) return ESP_ERR_INVALID_ARG;
+    char path[96];
+    layout_path(name, path, sizeof(path));
+    if (remove(path) != 0) return ESP_ERR_NOT_FOUND;
+    if (strcmp(s_cfg.active_layout, name) == 0) {
+        /* The screens stay on display; only the association is gone, so the
+         * user is not left staring at a blank panel because of a delete. */
+        s_cfg.active_layout[0] = '\0';
+        config_touch();
+    }
+    return ESP_OK;
+}
+
+esp_err_t config_layout_load(const char *name)
+{
+    if (!layout_name_ok(name)) return ESP_ERR_INVALID_ARG;
+
+    char path[96];
+    layout_path(name, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return ESP_ERR_NOT_FOUND;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 128 * 1024) { fclose(f); return ESP_ERR_INVALID_SIZE; }
+
+    char *buf = malloc((size_t)sz + 1);
+    if (buf == NULL) { fclose(f); return ESP_ERR_NO_MEM; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+
+    char err[96] = "";
+    esp_err_t rc = config_layout_apply_json(buf, rd, err, sizeof(err));
+    free(buf);
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "layout '%s' did not load: %s", name, err);
+        return rc;
+    }
+
+    strncpy(s_cfg.active_layout, name, sizeof(s_cfg.active_layout) - 1);
+    config_touch();
+    ESP_LOGI(TAG, "activated layout '%s' (%u panels)", name,
+             (unsigned)s_cfg.n_panels);
+    return ESP_OK;
+}
+
+esp_err_t config_layout_apply_json(const char *json, size_t len,
+                                   char *err, size_t cap)
+{
+    if (err && cap) err[0] = '\0';
+
+    config_t *tmp = malloc(sizeof(config_t));
+    if (tmp == NULL) { snprintf(err, cap, "out of memory"); return ESP_ERR_NO_MEM; }
+
+    /*
+     * A layout document has no endpoints or device block, so parse it over a
+     * copy of the live config: whatever it omits keeps its current value, and
+     * switching layouts cannot silently drop the endpoint you are polling.
+     */
+    *tmp = s_cfg;
+    tmp->n_screens = 0;
+    tmp->n_panels  = 0;
+
+    if (!parse_into_partial(tmp, json, len)) {
+        snprintf(err, cap, "could not parse the layout as JSON");
+        free(tmp);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (tmp->n_screens == 0) {
+        tmp->n_screens = 1;
+        strncpy(tmp->screens[0].title, "Home", sizeof(tmp->screens[0].title) - 1);
+    }
+    if (!validate(tmp, err, cap)) { free(tmp); return ESP_ERR_INVALID_ARG; }
+
+    s_cfg = *tmp;
+    free(tmp);
+    config_touch();
     return ESP_OK;
 }
 

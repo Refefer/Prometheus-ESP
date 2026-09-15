@@ -13,6 +13,8 @@
 #pragma once
 
 #include "esp_err.h"
+
+#include <stdio.h>
 #include "ui_fmt.h"
 #include "ui_tile.h"
 
@@ -130,6 +132,9 @@ typedef struct {
     bool    pinned;      /* the auto-packer leaves a pinned screen alone */
 } cfg_screen_t;
 
+#define CFG_LAYOUT_NAME_MAX 24
+#define CFG_MAX_LAYOUTS     12
+
 typedef struct {
     char     theme[16];
     uint16_t poll_default_s;
@@ -147,6 +152,15 @@ typedef struct {
     cfg_screen_t   screens[CFG_MAX_SCREENS];
     uint8_t        n_screens;
     uint16_t       next_id;
+
+    /*
+     * The layout currently on screen. Layouts are separate files holding just
+     * screens and panels; endpoints and device settings stay here, because
+     * the same exporter URL can serve entirely different metrics depending on
+     * what is running behind it -- an sglang layout and a vllm layout point at
+     * the same host and share nothing else.
+     */
+    char           active_layout[CFG_LAYOUT_NAME_MAX];
 } config_t;
 
 /* Load at boot: config.json, then config.bak, then factory defaults.
@@ -239,6 +253,43 @@ bool config_panel_fits(const cfg_panel_t *p, int col, int row);
  * there is one. Returns false if it neither fits nor swaps cleanly.
  */
 bool config_move_panel(cfg_panel_t *p, int col, int row);
+
+/* ---------------------------------------------------------------- layouts */
+
+/*
+ * A layout is the presentation half of the configuration -- screens and
+ * panels -- saved under a name so the panel can be repurposed without
+ * rebuilding it. Endpoints and device settings are deliberately NOT part of
+ * one: switching what you are looking at should not change what you are
+ * connected to.
+ */
+int  config_layout_list(char names[][CFG_LAYOUT_NAME_MAX], int max);
+esp_err_t config_layout_save(const char *name);
+esp_err_t config_layout_load(const char *name);
+esp_err_t config_layout_delete(const char *name);
+/* Writes the named layout's JSON, or the live screens/panels when name is
+ * NULL. Returns false if the layout does not exist. */
+bool config_layout_write_json(const char *name, FILE *f);
+/* Replaces the live screens/panels from JSON, without touching endpoints. */
+esp_err_t config_layout_apply_json(const char *json, size_t len,
+                                   char *err, size_t err_cap);
+const char *config_active_layout(void);
+
+/*
+ * Comma-separated legal values for an enum field, generated from the same
+ * tables the parser uses.
+ *
+ * Generated rather than written out, so a documented value that the parser
+ * would reject cannot exist -- which is the failure that makes a
+ * self-describing API worse than no API at all.
+ *
+ * `which` is one of: kind, fmt, reduce, agg, op.
+ *
+ * Writes into a caller buffer rather than returning a static one: five calls
+ * as arguments to a single printf all aliased the same storage, so every enum
+ * came back as whichever was formatted last.
+ */
+void config_enum_values(const char *which, char *out, size_t cap);
 
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id);
 cfg_endpoint_t *config_endpoint_add(void);

@@ -60,6 +60,46 @@ naming conventions -- counters become rates, `_bytes` becomes IEC, `_seconds`
 becomes a duration, ratios become gauges -- so the common case needs no
 further input.
 
+## The HTTP API
+
+The device describes itself, so something that has never seen it can work out
+what it can do:
+
+```sh
+curl http://$D/            # the routes, what they do, which need auth
+curl http://$D/schema      # the config format and every legal value
+curl http://$D/status      # identity, uptime, free memory
+```
+
+`/schema` generates its enum lists from the same tables the parser uses, so a
+documented value is a value that will be accepted.
+
+```sh
+curl -H "X-Auth: $TOK" http://$D/metrics-seen
+```
+
+scrapes the configured endpoint and reports every metric family it exposes --
+name, type, how many label sets, and a sample selector to copy. That is the
+half `/schema` cannot provide: the format is knowable from the firmware, but
+which metrics exist is not.
+
+### Layouts
+
+A layout is the presentation half -- screens and panels -- saved under a name.
+Endpoints and device settings are deliberately not part of one, because the
+same URL can serve completely different metrics depending on what is running
+behind it. An sglang layout and a vllm layout point at the same host and share
+nothing else.
+
+```sh
+curl -X POST -H "X-Auth: $TOK" http://$D/layouts/sglang/save      # store what is on screen
+curl -X POST -H "X-Auth: $TOK" --data-binary @vllm.json \
+     http://$D/layouts/vllm                                       # apply and store
+curl -X POST -H "X-Auth: $TOK" http://$D/layouts/sglang/activate  # switch
+curl      -H "X-Auth: $TOK" http://$D/layouts                     # list, and which is active
+curl -X DELETE -H "X-Auth: $TOK" http://$D/layouts/vllm
+```
+
 ## Pushing configuration
 
 The touch UI is good for adjusting a tile. It is a poor place to express "sum
