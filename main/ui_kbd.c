@@ -2,8 +2,12 @@
 #include "ui_layout.h"
 #include "ui_widgets.h"
 
+#include "esp_log.h"
+
 #include <stdio.h>
 #include <string.h>
+
+static const char *TAG = "kbd";
 
 /* --------------------------------------------------------------- keymaps */
 
@@ -96,10 +100,20 @@ static lv_keyboard_mode_t mode_for(kb_kind_t k)
 
 static void kb_show(lv_obj_t *ta, kb_kind_t kind)
 {
+    if (s_kb == NULL) { ESP_LOGE(TAG, "kb_show: no keyboard!"); return; }
     lv_keyboard_set_mode(s_kb, mode_for(kind));
     lv_keyboard_set_textarea(s_kb, ta);
     lv_obj_clear_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_kb);
+
+    /* Cheap insurance against the alignment trap above ever coming back: an
+     * off-screen keyboard looks identical to a broken one from the outside. */
+    lv_coord_t y = lv_obj_get_y(s_kb);
+    if (y < 0 || y + lv_obj_get_height(s_kb) > SCR_H) {
+        ESP_LOGE(TAG, "keyboard off-screen at y=%d (h=%d, screen=%d)",
+                 (int)y, (int)lv_obj_get_height(s_kb), SCR_H);
+    }
+    ESP_LOGD(TAG, "kb_show kind=%d y=%d", (int)kind, (int)y);
 }
 
 static void kb_hide(void)
@@ -285,7 +299,10 @@ void ui_kbd_set_status(const char *msg, severity_t sev)
 
 void ui_kbd_edit(const ui_kbd_req_t *req)
 {
-    if (req == NULL || s_kb == NULL) return;
+    if (req == NULL || s_kb == NULL) {
+        ESP_LOGE(TAG, "ui_kbd_edit called before ui_kbd_init");
+        return;
+    }
     if (s_sheet) sheet_close(NULL);
     s_req = *req;
 
@@ -402,7 +419,21 @@ void ui_kbd_init(void)
 
     s_kb = lv_keyboard_create(lv_layer_top());
     lv_obj_set_size(s_kb, SCR_W, KB_H);
-    lv_obj_set_pos(s_kb, 0, KB_Y);
+
+    /*
+     * Align, do NOT set_pos.
+     *
+     * lv_keyboard's constructor calls lv_obj_align(obj, LV_ALIGN_BOTTOM_MID, 0, 0),
+     * and in LVGL 8 lv_obj_set_pos() sets an offset RELATIVE TO THE CURRENT
+     * ALIGNMENT rather than absolute parent coordinates. So set_pos(0, KB_Y)
+     * meant "KB_Y px below the bottom anchor" and parked the keyboard at
+     * y = 480 - 210 + 270 = 540 -- entirely off a 480px screen, with no error
+     * anywhere and the object still reporting hidden=0.
+     *
+     * Bottom alignment with KB_H = 210 lands at exactly KB_Y, which is what
+     * every layout in this app assumes.
+     */
+    lv_obj_align(s_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
 
     lv_keyboard_set_map(s_kb, KB_MODE_URL_LO,
