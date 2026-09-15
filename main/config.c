@@ -5,6 +5,9 @@
 #include "esp_log.h"
 #include "lvgl.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,7 +157,7 @@ static esp_err_t write_config(const char *path)
     return ESP_OK;
 }
 
-esp_err_t config_flush(void)
+esp_err_t config_flush_sync(void)
 {
     if (!storage_cfg_ready()) return ESP_ERR_INVALID_STATE;
 
@@ -174,6 +177,31 @@ esp_err_t config_flush(void)
              (unsigned)s_cfg.n_endpoints, (unsigned)s_cfg.n_panels,
              (unsigned)s_cfg.n_screens);
     return ESP_OK;
+}
+
+static volatile bool s_writing;
+
+static void flush_task(void *arg)
+{
+    (void)arg;
+    config_flush_sync();
+    s_writing = false;
+    vTaskDelete(NULL);
+}
+
+void config_flush(void)
+{
+    if (s_writing) return;           /* one writer at a time */
+    s_writing = true;
+    /*
+     * 4KB is comfortable for LittleFS + stdio and is freed as soon as the
+     * write completes. Doing this on the LVGL task instead risks its 6KB
+     * stack and stalls rendering for the duration of a flash erase.
+     */
+    if (xTaskCreate(flush_task, "cfg_write", 4096, NULL, 4, NULL) != pdPASS) {
+        s_writing = false;
+        ESP_LOGE(TAG, "could not spawn the config writer");
+    }
 }
 
 static void flush_timer_cb(lv_timer_t *t)

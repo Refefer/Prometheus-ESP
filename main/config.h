@@ -94,9 +94,19 @@ config_t *config_get(void);
  * ticking forty checkboxes writes once, not forty times. */
 void config_touch(void);
 
-/* Write now (atomically). Called by the debounce timer and on leaving a
- * settings screen. */
-esp_err_t config_flush(void);
+/*
+ * Write now, atomically, ON A WORKER TASK.
+ *
+ * Never write from the LVGL task: LittleFS plus stdio needs several KB of
+ * stack and the LVGL task runs on 6KB with under 2KB of idle headroom, and a
+ * flash erase blocks for long enough to visibly stall rendering. Every caller
+ * is a button handler or a timer running in that task, so this spawns a
+ * short-lived writer and returns immediately.
+ */
+void config_flush(void);
+
+/* Synchronous variant, for callers that are already off the LVGL task. */
+esp_err_t config_flush_sync(void);
 
 /* True when the last load fell back to defaults. */
 bool config_was_reset(void);

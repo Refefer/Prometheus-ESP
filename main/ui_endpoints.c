@@ -230,7 +230,8 @@ static void save_cb(lv_event_t *e)
     ep->enabled = true;
 
     config_touch();
-    config_flush();          /* leaving a settings screen flushes immediately */
+    config_flush();          /* leaving a settings screen flushes immediately;
+                              * the write itself happens on a worker */
     poller_set_endpoint(ep->url, s_poll_s);
     close_overlay();
 }

@@ -233,6 +233,19 @@ static void build_dashboard(void)
 static void dashboard_tick(lv_timer_t *timer)
 {
     (void)timer;
+
+    /*
+     * Liveness beat from the LVGL task itself. The poller logs from core 0,
+     * so a wedged UI task looks identical over serial to a healthy one --
+     * data flowing, screen frozen. This distinguishes the two.
+     */
+    static int beat;
+    if (beat++ % 20 == 0) {
+        ESP_LOGI(TAG, "ui alive: tiles=%s seen_gen=%u stack_hw=%u",
+                 s_tiles[0] ? "built" : "NULL", (unsigned)s_seen_gen,
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    }
+
     if (s_tiles[0] == NULL) return;
 
     poller_snap_t snap;
