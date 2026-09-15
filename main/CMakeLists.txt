@@ -22,6 +22,7 @@ idf_component_register(
         "ui_endpoints.c"
         "ui_browser.c"
         "ui_panelcfg.c"
+        "ui_layouts.c"
         "webcfg.c"
     INCLUDE_DIRS "."
     REQUIRES

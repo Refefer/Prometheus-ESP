@@ -745,6 +745,46 @@ bool config_layout_write_json(const char *name, FILE *f)
     return true;
 }
 
+/*
+ * How many tiles a stored layout holds, without parsing it.
+ *
+ * The picker needs something to tell two saved layouts apart, and a name
+ * alone does not do it. Counting a key over a sliding window costs a few
+ * hundred bytes of stack against cJSON's whole tree, and a wrong count here
+ * mislabels a row -- it cannot corrupt anything.
+ *
+ * The key is "terms", not "sel": every panel writes exactly one terms array,
+ * whereas a panel that combines two series writes two sel strings, and
+ * counting those reports six tiles for five.
+ */
+int config_layout_panel_count(const char *name)
+{
+    if (!layout_name_ok(name)) return -1;
+
+    char path[96];
+    layout_path(name, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) return -1;
+
+    static const char needle[] = "\"terms\"";
+    const size_t nlen = sizeof(needle) - 1;
+
+    char buf[256 + sizeof(needle)];
+    size_t carry = 0;                 /* bytes kept from the previous chunk */
+    int n = 0, got;
+    while ((got = (int)fread(buf + carry, 1, sizeof(buf) - carry, f)) > 0) {
+        size_t have = carry + (size_t)got;
+        for (size_t i = 0; i + nlen <= have; i++) {
+            if (memcmp(buf + i, needle, nlen) == 0) { n++; i += nlen - 1; }
+        }
+        /* A match can straddle a read boundary, so retain nlen-1 bytes. */
+        carry = have >= nlen - 1 ? nlen - 1 : have;
+        memmove(buf, buf + have - carry, carry);
+    }
+    fclose(f);
+    return n;
+}
+
 esp_err_t config_layout_save(const char *name)
 {
     if (!layout_name_ok(name)) return ESP_ERR_INVALID_ARG;

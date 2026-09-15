@@ -28,6 +28,7 @@
 #include "ui_layout.h"
 #include "ui_browser.h"
 #include "ui_panelcfg.h"
+#include "ui_layouts.h"
 #include "ui_endpoints.h"
 #include "ui_setup.h"
 #include "webcfg.h"
@@ -127,6 +128,7 @@ static void run_parser_smoke(char *out, size_t cap)
 
 
 static void rebuild_dashboard(void);   /* defined with the dashboard below */
+static void set_hdr_title(void);
 static void browser_closed(void);      /* rebuilds tiles after any modal */
 static void hole_tapped(lv_event_t *e);
 
@@ -181,7 +183,8 @@ static uint32_t     s_seen_gen = UINT32_MAX;
 static bool modal_open(void)
 {
     return ui_panelcfg_is_open() || ui_browser_is_open() ||
-           ui_endpoints_is_open() || ui_setup_is_open();
+           ui_endpoints_is_open() || ui_setup_is_open() ||
+           ui_layouts_is_open();
 }
 
 static void build_tiles(lv_obj_t *scr)
@@ -299,24 +302,63 @@ static void browse_cb(lv_event_t *e)
     ui_browser_open(browser_closed);
 }
 
+static void layouts_closed(void)
+{
+    /* Activating a layout replaces every panel, so the watch list and the
+     * tiles both have to be rebuilt -- in that order, since slot i must
+     * still be tile i. */
+    poller_reload();
+    build_tiles(lv_scr_act());
+    set_hdr_title();
+    s_seen_gen = UINT32_MAX;
+}
+
+static void layouts_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_layouts_open(layouts_closed);
+}
+
+/*
+ * Endpoint on the left, layout after it.
+ *
+ * Which dashboard is on screen is not otherwise visible anywhere -- two
+ * layouts over the same endpoint look like two different devices until you
+ * notice the tiles differ.
+ */
+static void set_hdr_title(void)
+{
+    const config_t *c = config_get();
+    const char *ep = (c->n_endpoints && c->endpoints[0].name[0])
+                     ? c->endpoints[0].name : "Prometheus Panel";
+    const char *ly = config_active_layout();
+    if (ly[0]) label_set_fmt_if_changed(s_hdr_title, "%s  \u00b7  %s", ep, ly);
+    else       label_set_if_changed(s_hdr_title, ep);
+}
+
 static void build_dashboard(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
-    const config_t *c = config_get();
-
     s_hdr_title = make_label(scr, FONT_L, COL_TEXT);
-    lv_label_set_text(s_hdr_title, (c->n_endpoints && c->endpoints[0].name[0])
-                                   ? c->endpoints[0].name : "Prometheus Panel");
     lv_obj_set_pos(s_hdr_title, GRID_MX, 8);
+    /* Bounded and elided rather than left to grow: an endpoint and a layout
+     * name concatenated can run under the status readout. */
+    lv_obj_set_width(s_hdr_title, 370);
+    lv_label_set_long_mode(s_hdr_title, LV_LABEL_LONG_DOT);
+    set_hdr_title();
 
     s_hdr_status = make_label(scr, FONT_S, COL_DIM);
-    lv_obj_set_pos(s_hdr_status, 300, 14);
+    lv_obj_set_pos(s_hdr_status, 400, 14);
 
     lv_obj_t *wifi = make_btn(scr, LV_SYMBOL_WIFI, reopen_setup_cb, NULL);
     lv_obj_set_size(wifi, 52, 30);
     lv_obj_set_pos(wifi, SCR_W - 168 - GRID_MX, 4);
+
+    lv_obj_t *lay = make_btn(scr, LV_SYMBOL_COPY, layouts_cb, NULL);
+    lv_obj_set_size(lay, 52, 30);
+    lv_obj_set_pos(lay, SCR_W - 226 - GRID_MX, 4);
 
     lv_obj_t *list = make_btn(scr, LV_SYMBOL_LIST, browse_cb, NULL);
     lv_obj_set_size(list, 52, 30);
@@ -363,10 +405,7 @@ static void build_dashboard(void)
 
 static void rebuild_dashboard(void)
 {
-    const config_t *c = config_get();
-    label_set_if_changed(s_hdr_title,
-                         (c->n_endpoints && c->endpoints[0].name[0])
-                         ? c->endpoints[0].name : "Prometheus Panel");
+    set_hdr_title();
 }
 
 static void browser_closed(void)
@@ -400,10 +439,8 @@ static void dashboard_tick(lv_timer_t *timer)
         seen_cfg = cfg_gen;
         build_tiles(lv_scr_act());
         s_seen_gen = UINT32_MAX;
+        set_hdr_title();
         const config_t *c = config_get();
-        label_set_if_changed(s_hdr_title,
-                             (c->n_endpoints && c->endpoints[0].name[0])
-                             ? c->endpoints[0].name : "Prometheus Panel");
         if (c->n_endpoints) {
             poller_set_endpoint(c->endpoints[0].url,
                                 c->endpoints[0].poll_s ? c->endpoints[0].poll_s

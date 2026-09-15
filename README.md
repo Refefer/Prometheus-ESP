@@ -91,6 +91,11 @@ same URL can serve completely different metrics depending on what is running
 behind it. An sglang layout and a vllm layout point at the same host and share
 nothing else.
 
+On the device, the header's layouts button lists what is saved, marks which
+one is on screen, and switches with one tap. Switching away from an
+arrangement that was never saved stores it as `autosave` first, so hand-placed
+tiles are never lost to a tap.
+
 ```sh
 curl -X POST -H "X-Auth: $TOK" http://$D/layouts/sglang/save      # store what is on screen
 curl -X POST -H "X-Auth: $TOK" --data-binary @vllm.json \

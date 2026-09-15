@@ -267,6 +267,8 @@ int  config_layout_list(char names[][CFG_LAYOUT_NAME_MAX], int max);
 esp_err_t config_layout_save(const char *name);
 esp_err_t config_layout_load(const char *name);
 esp_err_t config_layout_delete(const char *name);
+/* Tiles in a stored layout, or -1 if it cannot be read. */
+int  config_layout_panel_count(const char *name);
 /* Writes the named layout's JSON, or the live screens/panels when name is
  * NULL. Returns false if the layout does not exist. */
 bool config_layout_write_json(const char *name, FILE *f);
