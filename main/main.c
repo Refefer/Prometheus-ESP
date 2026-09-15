@@ -127,12 +127,13 @@ static void run_parser_smoke(char *out, size_t cap)
 
 
 static void rebuild_dashboard(void);   /* defined with the dashboard below */
+static void browser_closed(void);      /* rebuilds tiles after any modal */
 static void hole_tapped(lv_event_t *e);
 
 static void reopen_setup_cb(lv_event_t *e)
 {
     (void)e;
-    ui_setup_open();
+    ui_setup_open(browser_closed);
 }
 
 static void endpoints_cb(lv_event_t *e)
@@ -269,8 +270,6 @@ static void build_tiles(lv_obj_t *scr)
      * the hint only needs to explain the gesture once. */
     hidden_if_changed(s_empty, s_tile_n > 0);
 }
-
-static void browser_closed(void);
 
 /* A tap on a tile opens its settings; closing them rebuilds, since the widget
  * type or span may have changed. */
@@ -521,7 +520,7 @@ void app_main(void)
         } else {
             /* First boot: land straight in setup rather than showing a
              * dashboard that cannot possibly have data. */
-            ui_setup_open();
+            ui_setup_open(browser_closed);
         }
         /* Created regardless of which screen is up: the heartbeat is the only
          * way to see this device's state over serial, since the native-USB

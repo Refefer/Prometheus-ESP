@@ -22,6 +22,7 @@ static const char *TAG = "setup";
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_step_page;
+static void (*s_on_close)(void);
 
 /* WiFi step widgets */
 static lv_obj_t *s_dd_networks;
@@ -68,6 +69,24 @@ static void clear_page(void)
     s_btn_join = s_spinner = NULL;
 }
 
+static void close_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_setup_close();
+}
+
+/*
+ * Every step carries the exit. A wizard you can only leave by finishing it is
+ * a trap when it was opened by a mis-tap, and this one is reachable from a
+ * button on the dashboard.
+ */
+static void add_close_button(void)
+{
+    lv_obj_t *x = make_btn(s_step_page, LV_SYMBOL_CLOSE, close_cb, NULL);
+    lv_obj_set_size(x, 56, 40);
+    lv_obj_align(x, LV_ALIGN_TOP_RIGHT, -GRID_MX, 12);
+}
+
 static lv_obj_t *step_heading(const char *step, const char *title)
 {
     lv_obj_t *s = make_label(s_step_page, FONT_S, COL_ACCENT);
@@ -87,6 +106,7 @@ static void welcome_next_cb(lv_event_t *e) { (void)e; build_wifi(); }
 static void build_welcome(void)
 {
     clear_page();
+    add_close_button();
 
     lv_obj_t *t = make_label(s_step_page, FONT_XL, COL_TEXT);
     lv_label_set_text(t, "Prometheus Panel");
@@ -300,6 +320,7 @@ static void back_cb(lv_event_t *e) { (void)e; build_welcome(); }
 static void build_wifi(void)
 {
     clear_page();
+    add_close_button();
     step_heading("STEP 1 OF 2", "Wi-Fi");
 
     lv_obj_t *cap = make_label(s_step_page, FONT_S, COL_DIM);
@@ -348,6 +369,7 @@ static void build_wifi(void)
 static void build_done(void)
 {
     clear_page();
+    add_close_button();
 
     char ip[16] = "";
     int8_t rssi = 0;
@@ -363,18 +385,41 @@ static void build_done(void)
     lv_obj_align(info, LV_ALIGN_TOP_MID, 0, 180);
 
     lv_obj_t *next = make_label(s_step_page, FONT_M, COL_DIM);
-    lv_label_set_text(next,
-                      "Next: point the panel at a metrics endpoint.\n"
-                      "That screen is the next milestone.");
+    lv_label_set_text(next, "The gear button sets which endpoint to poll.");
     lv_obj_set_style_text_align(next, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(next, LV_ALIGN_TOP_MID, 0, 240);
+
+    lv_obj_t *fin = make_btn_accent(s_step_page, LV_SYMBOL_OK "  Done",
+                                    close_cb, NULL);
+    lv_obj_set_size(fin, 200, BTN_H);
+    lv_obj_align(fin, LV_ALIGN_BOTTOM_MID, 0, -40);
 }
 
 /* -------------------------------------------------------------------- open */
 
-void ui_setup_open(void)
+void ui_setup_close(void)
+{
+    if (s_root == NULL) return;
+
+    /* A join can still be in flight; its timer would fire into a deleted
+     * tree. */
+    if (s_join_timer) { lv_timer_del(s_join_timer); s_join_timer = NULL; }
+
+    lv_obj_del(s_root);
+    s_root = NULL;
+    s_step_page = NULL;
+    s_dd_networks = s_lbl_apinfo = s_lbl_status = NULL;
+    s_btn_join = s_spinner = NULL;
+
+    /* The scan task checks these under the LVGL lock before touching them, so
+     * clearing them is what makes an in-flight scan safe. */
+    if (s_on_close) s_on_close();
+}
+
+void ui_setup_open(void (*on_close)(void))
 {
     if (s_root) return;
+    s_on_close = on_close;
 
     s_root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_root, SCR_W, SCR_H);
