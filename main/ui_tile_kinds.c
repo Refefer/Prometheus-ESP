@@ -191,13 +191,27 @@ static void spark_build(tile_inst_t *t, lv_obj_t *body)
     lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
 
     p->val = make_label(body, num_font(t, true), COL_TEXT);
-    lv_obj_set_pos(p->val, 0, 0);
     p->suf = make_label(body, FONT_M, COL_DIM);
-
     make_chart(t, body, p, 60, false);
-    lv_coord_t ch = h / 2 < 30 ? 30 : h / 2;
-    lv_obj_set_size(p->chart, w, ch);
-    lv_obj_set_pos(p->chart, 0, h - ch);
+
+    /*
+     * A wide tile puts the sparkline beside the number, not under it: at 2x1
+     * the body is only 96px tall and the 64px numeral would sit on top of the
+     * chart. A square tile stacks them, with the numeral dropped to the
+     * smaller face so the two do not collide there either.
+     */
+    if (t->spec->w >= 2) {
+        lv_coord_t cw = w / 2 - 8;
+        lv_obj_set_pos(p->val, 0, 6);
+        lv_obj_set_size(p->chart, cw, h - 16);
+        lv_obj_set_pos(p->chart, w - cw, 8);
+    } else {
+        lv_coord_t ch = h - 52;
+        if (ch < 24) ch = 24;
+        lv_obj_set_pos(p->val, 0, 0);
+        lv_obj_set_size(p->chart, w, ch);
+        lv_obj_set_pos(p->chart, 0, h - ch);
+    }
 }
 
 static void spark_update(tile_inst_t *t, const tile_data_t *d)
@@ -264,9 +278,17 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
     lv_obj_set_pos(p->val, 0, 0);
     p->suf = make_label(body, FONT_M, COL_DIM);
 
+    /*
+     * Vertical budget, explicitly: the value occupies the top ~64px, the
+     * caption needs CAP_H at the bottom, and the chart gets what is left.
+     * Positioning the caption at h-4 put its TOP 4px from the bottom edge, so
+     * its whole height overflowed the body -- which clips, so it vanished.
+     */
+    const lv_coord_t CHART_TOP = 68;
+    const lv_coord_t CAP_H     = 16;
     make_chart(t, body, p, TILE_HIST_MAX, true);
-    lv_obj_set_size(p->chart, w - 48, h - 74);
-    lv_obj_set_pos(p->chart, 44, 68);
+    lv_obj_set_size(p->chart, w - 48, h - CHART_TOP - CAP_H);
+    lv_obj_set_pos(p->chart, 44, CHART_TOP);
     lv_chart_set_axis_tick(p->chart, LV_CHART_AXIS_PRIMARY_Y,
                            0, 0, 3, 1, true, 44);
     lv_obj_set_style_text_font(p->chart, FONT_XS, LV_PART_TICKS);
@@ -275,7 +297,7 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
 
     lv_obj_t *cap = make_label(body, FONT_XS, COL_DIM);
     lv_label_set_text(cap, "last 10 min");
-    lv_obj_set_pos(cap, 44, h - 4);
+    lv_obj_set_pos(cap, 44, h - CAP_H + 1);
 }
 
 static void chartt_update(tile_inst_t *t, const tile_data_t *d)

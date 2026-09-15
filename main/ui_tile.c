@@ -6,9 +6,13 @@
 #include "ui_layout.h"
 #include "ui_widgets.h"
 
+#include "esp_log.h"
+
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const char *TAG = "tile";
 
 extern const tile_vt_t tile_stat_vt, tile_spark_vt, tile_chart_vt,
                        tile_bar_vt, tile_gauge_vt, tile_status_vt;
@@ -94,6 +98,29 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
     lv_obj_clear_flag(t->body, LV_OBJ_FLAG_SCROLLABLE);
 
     if (t->vt->build) t->vt->build(t, t->body);
+
+    /*
+     * A child that extends past the body is silently CLIPPED -- it simply
+     * does not appear, with nothing logged and nothing to see but a missing
+     * caption. Renderers size themselves from the span, so a layout that fits
+     * at 2x2 can overflow at 1x1; checking here catches every renderer at
+     * every span instead of relying on someone redoing the arithmetic.
+     */
+    lv_obj_update_layout(t->body);
+    lv_coord_t bh = lv_obj_get_height(t->body), bw = lv_obj_get_width(t->body);
+    uint32_t n = lv_obj_get_child_cnt(t->body);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(t->body, i);
+        lv_coord_t bot = lv_obj_get_y(c) + lv_obj_get_height(c);
+        lv_coord_t rgt = lv_obj_get_x(c) + lv_obj_get_width(c);
+        if (bot > bh || rgt > bw) {
+            ESP_LOGE(TAG, "%s tile \"%s\" %ux%u: child %u extends to %d,%d "
+                          "in a %dx%d body -- it will be clipped",
+                     t->vt->name, spec->title ? spec->title : "?",
+                     spec->w, spec->h, (unsigned)i, (int)rgt, (int)bot,
+                     (int)bw, (int)bh);
+        }
+    }
     return t;
 }
 
