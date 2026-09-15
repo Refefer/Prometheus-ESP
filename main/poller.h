@@ -49,6 +49,14 @@ typedef struct {
 
 esp_err_t poller_start(const char *url, int interval_s);
 
+/* Retarget a running poller. Safe from the LVGL task: the scrape loop picks
+ * the new URL up on its next cycle, and the cached connection is dropped so
+ * the next request cannot reuse a socket to the old host. */
+void poller_set_endpoint(const char *url, int interval_s);
+
+/* The URL currently being polled (empty when unconfigured). */
+const char *poller_url(void);
+
 /* Copies the current snapshot. Safe from the LVGL task; holds the mutex for
  * microseconds. Safe to call before poller_start(), which yields a zeroed
  * snapshot rather than crashing -- the UI is built before the poller runs. */

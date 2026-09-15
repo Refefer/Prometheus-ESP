@@ -19,12 +19,14 @@
 #include "lvgl.h"
 
 #include "lvgl_port.h"
+#include "config.h"
 #include "poller.h"
 #include "prom_text.h"
 #include "secrets.h"
 #include "storage.h"
 #include "ui_kbd.h"
 #include "ui_layout.h"
+#include "ui_endpoints.h"
 #include "ui_setup.h"
 #include "ui_theme.h"
 #include "ui_tile.h"
@@ -127,6 +129,24 @@ static void reopen_setup_cb(lv_event_t *e)
     ui_setup_open();
 }
 
+static lv_obj_t *s_hdr_title;
+
+static void rebuild_dashboard(void)
+{
+    /* The editor overlay is gone and the tiles underneath are intact, so only
+     * the header caption can have changed. */
+    config_t *c = config_get();
+    label_set_if_changed(s_hdr_title,
+                         (c->n_endpoints && c->endpoints[0].name[0])
+                         ? c->endpoints[0].name : "Prometheus Panel");
+}
+
+static void endpoints_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_endpoints_open(rebuild_dashboard);
+}
+
 /*
  * A real tile grid, laid out with the production geometry from ui_layout.h so
  * this milestone validates the grid arithmetic on the actual panel as well as
@@ -165,14 +185,22 @@ static void build_dashboard(void)
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
 
-    lv_obj_t *title = make_label(scr, FONT_L, COL_TEXT);
-    lv_label_set_text(title, "Inference");
-    lv_obj_set_pos(title, GRID_MX, 8);
+    s_hdr_title = make_label(scr, FONT_L, COL_TEXT);
+    config_t *c = config_get();
+    lv_label_set_text(s_hdr_title, (c->n_endpoints && c->endpoints[0].name[0])
+                                   ? c->endpoints[0].name : "Prometheus Panel");
+    lv_obj_set_pos(s_hdr_title, GRID_MX, 8);
 
     s_hdr_status = make_label(scr, FONT_S, COL_DIM);
     lv_obj_set_pos(s_hdr_status, 300, 14);
 
-    lv_obj_t *gear = make_btn(scr, LV_SYMBOL_SETTINGS, reopen_setup_cb, NULL);
+    /* Two buttons rather than one menu: with exactly two destinations, a menu
+     * is an extra tap and an extra thing to discover. */
+    lv_obj_t *wifi = make_btn(scr, LV_SYMBOL_WIFI, reopen_setup_cb, NULL);
+    lv_obj_set_size(wifi, 52, 30);
+    lv_obj_set_pos(wifi, SCR_W - 110 - GRID_MX, 4);
+
+    lv_obj_t *gear = make_btn(scr, LV_SYMBOL_SETTINGS, endpoints_cb, NULL);
     lv_obj_set_size(gear, 52, 30);
     lv_obj_set_pos(gear, SCR_W - 52 - GRID_MX, 4);
 
@@ -275,6 +303,8 @@ void app_main(void)
 
     run_parser_smoke(s_smoke_result, sizeof(s_smoke_result));
 
+
+
     /* Radio up before the UI: with no credentials stored the station still
      * starts, which is exactly what the setup wizard's scan needs. */
     if (wifi_mgr_start() != ESP_OK) {
@@ -282,6 +312,13 @@ void app_main(void)
     }
 
     if (lvgl_port_lock(-1)) {
+        /*
+         * Inside the lock: config_load creates the debounced-flush lv_timer,
+         * and the dashboard reads the endpoint name for its header.
+         */
+        if (config_load() != ESP_OK && config_was_reset()) {
+            ESP_LOGW(TAG, "starting from factory defaults");
+        }
         ui_kbd_init();
         if (secrets_have_wifi()) {
             build_dashboard();
@@ -298,9 +335,14 @@ void app_main(void)
     }
 
     if (secrets_have_wifi()) {
-        /* Milestone scope: a fixed endpoint. The editor and the stored
-         * endpoint list replace this argument, not the call. */
-        poller_start("http://192.168.1.60:12345/metrics", 5);
+        const config_t *c = config_get();
+        const char *url = c->n_endpoints ? c->endpoints[0].url : "";
+        int interval = c->n_endpoints && c->endpoints[0].poll_s
+                     ? c->endpoints[0].poll_s : c->device.poll_default_s;
+        poller_start(url, interval);
+        if (url[0] == '\0') {
+            ESP_LOGW(TAG, "no endpoint configured; use the gear button");
+        }
     }
 
     ESP_LOGI(TAG, "boot complete: SRAM %u KB free, PSRAM %u KB free",

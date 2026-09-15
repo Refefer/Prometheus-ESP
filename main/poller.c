@@ -308,6 +308,28 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
 /* -------------------------------------------------------------------- task */
 
+void poller_set_endpoint(const char *url, int interval_s)
+{
+    if (url == NULL) return;
+    if (s_mux && xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
+        strncpy(s_url, url, sizeof(s_url) - 1);
+        s_url[sizeof(s_url) - 1] = '\0';
+        s_interval_s = interval_s > 0 ? interval_s : 10;
+        s_snap.fail_streak = 0;      /* a new target starts with a clean slate */
+        xSemaphoreGive(s_mux);
+    } else {
+        strncpy(s_url, url, sizeof(s_url) - 1);
+        s_interval_s = interval_s > 0 ? interval_s : 10;
+    }
+    /* The cached connection belongs to the old host. */
+    http_drop_slot(0);
+    /* Rates measured against the old target are meaningless for the new one. */
+    memset(s_state, 0, sizeof(s_state));
+    ESP_LOGI(TAG, "endpoint set to %s every %ds", url, s_interval_s);
+}
+
+const char *poller_url(void) { return s_url; }
+
 static void poller_task(void *arg)
 {
     (void)arg;
@@ -332,6 +354,24 @@ static void poller_task(void *arg)
          */
         if (!wifi_mgr_is_connected()) {
             publish(false, "waiting for wi-fi", 0, NULL, 0);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        if (s_url[0] == '\0') {
+            publish(false, "no endpoint configured", 0, NULL, 0);
+            /*
+             * Rate-limited, but present: an idle device that logs nothing at
+             * all is indistinguishable over serial from a hung one, and this
+             * is the state a factory-fresh panel sits in.
+             */
+            static int quiet;
+            if (quiet++ % 30 == 0) {
+                ESP_LOGW(TAG, "no endpoint configured -- set one with the "
+                              "gear button (SRAM %uK PSRAM %uK)",
+                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+            }
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -383,7 +423,7 @@ static void poller_task(void *arg)
 
 esp_err_t poller_start(const char *url, int interval_s)
 {
-    if (url == NULL) return ESP_ERR_INVALID_ARG;
+    if (url == NULL) url = "";
     strncpy(s_url, url, sizeof(s_url) - 1);
     s_interval_s = interval_s > 0 ? interval_s : 10;
 

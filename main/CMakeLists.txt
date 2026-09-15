@@ -10,6 +10,7 @@ idf_component_register(
         "ui_fmt.c"
         "http_util.c"
         "poller.c"
+        "config.c"
         "ui_tile.c"
         "ui_tile_kinds.c"
         "font_num_44.c"
@@ -18,6 +19,7 @@ idf_component_register(
         "ui_widgets.c"
         "ui_kbd.c"
         "ui_setup.c"
+        "ui_endpoints.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver esp_lcd esp_timer
