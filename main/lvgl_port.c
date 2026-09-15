@@ -137,6 +137,17 @@ static lv_indev_t *indev_init(esp_lcd_touch_handle_t tp)
     indev_drv_tp.type = LV_INDEV_TYPE_POINTER;
     indev_drv_tp.read_cb = touchpad_read;
     indev_drv_tp.user_data = tp;
+    /*
+     * Tuned for a 7" panel held at arm's length, not a phone.
+     *
+     * The 50px default gesture threshold is 6% of this screen's width, which
+     * is a deliberate-feeling stretch of the thumb; 40 still cannot be
+     * reached by the wobble of a tap. The 400ms default long press fires
+     * while a finger is merely resting, which on a wall panel reads as the
+     * device doing things by itself.
+     */
+    indev_drv_tp.gesture_limit   = 40;
+    indev_drv_tp.long_press_time = 500;
 
     return lv_indev_drv_register(&indev_drv_tp);
 }

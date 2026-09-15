@@ -955,6 +955,19 @@ bool config_has_panel(uint16_t ep_id, const char *sel)
  * user can move tiles afterwards, and an auto-layout that reshuffles existing
  * tiles when a new one arrives is infuriating. Only free cells are used.
  */
+bool config_ensure_screen(uint8_t idx)
+{
+    if (idx >= CFG_MAX_SCREENS) return false;
+    while (s_cfg.n_screens <= idx) {
+        cfg_screen_t *sc = &s_cfg.screens[s_cfg.n_screens];
+        memset(sc, 0, sizeof(*sc));
+        snprintf(sc->title, sizeof(sc->title), "Screen %u",
+                 (unsigned)s_cfg.n_screens + 1);
+        s_cfg.n_screens++;
+    }
+    return true;
+}
+
 bool config_place_panel(cfg_panel_t *p)
 {
     bool used[GRID_ROWS][GRID_COLS];

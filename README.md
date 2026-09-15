@@ -83,6 +83,15 @@ name, type, how many label sets, and a sample selector to copy. That is the
 half `/schema` cannot provide: the format is knowable from the firmware, but
 which metrics exist is not.
 
+### Screens
+
+A tile carries a `screen`, and swiping pages between them. Screens are not a
+list you maintain -- a screen exists because something is on it, and the page
+after the last one is always there while panels remain in budget, so a new
+screen is made by swiping to it and tapping a cell. Every screen's panels are
+polled whether or not you are looking at them, so a counter has its baseline
+and a chart its history by the time you swipe across.
+
 ### Layouts
 
 A layout is the presentation half -- screens and panels -- saved under a name.

@@ -33,6 +33,17 @@
 #define POLLER_TEXT_MAX  24
 
 typedef struct {
+    /*
+     * Which panel these numbers belong to.
+     *
+     * The dashboard used to pair snapshot slot i with tile i, which required
+     * the poller and the tile builder to filter panels by exactly the same
+     * predicate -- and a mismatch showed one metric's numbers under another
+     * metric's title, silently. With screens the two lists genuinely differ:
+     * the poller watches every panel so a screen is populated the moment you
+     * swipe to it, while the tiles cover only the screen on display.
+     */
+    uint16_t panel_id;
     char   label[POLLER_NAME_MAX];   /* display name */
     char   num[POLLER_TEXT_MAX];     /* formatted value */
     char   suffix[POLLER_TEXT_MAX];  /* unit */
@@ -91,8 +102,9 @@ const char *poller_url(void);
  * snapshot rather than crashing -- the UI is built before the poller runs. */
 void poller_snapshot(poller_snap_t *out);
 
-/* Rebuild the watch list from the stored panels. Safe from the LVGL task:
- * the scrape loop picks the new list up on its next cycle. */
+/* Ask for the watch list to be rebuilt from the stored panels. Safe from any
+ * task: it raises a flag and the scrape loop does the work, so s_watch is
+ * only ever written by the task that reads it. */
 void poller_reload(void);
 
 /* The panel id backing a watch slot, so the UI can map a tile to its config. */

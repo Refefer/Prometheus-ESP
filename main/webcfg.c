@@ -595,11 +595,12 @@ static esp_err_t get_schema(httpd_req_t *req)
     config_enum_values("agg",    ea, sizeof(ea));
     config_enum_values("op",     eo, sizeof(eo));
 
-    char buf[1024];
+    char buf[1280];
     snprintf(buf, sizeof(buf),
 "{\n"
 "  \"schema\": %u,\n"
-"  \"grid\": { \"cols\": %d, \"rows\": %d, \"max_panels\": %d, \"max_terms\": %d },\n"
+"  \"grid\": { \"cols\": %d, \"rows\": %d, \"max_panels\": %d, \"max_terms\": %d,\n"
+"             \"max_screens\": %d, \"note\": \"max_panels is the total across every screen\" },\n"
 "  \"model\": \"A panel draws one number. It has TERMS; each term selects a set of series and reduces that set to a scalar, and an op combines the terms.\",\n"
 "  \"enums\": {\n"
 "    \"kind\":   [%s],\n"
@@ -609,7 +610,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"op\":     [%s]\n"
 "  },\n",
         (unsigned)CFG_SCHEMA_VERSION, GRID_COLS, GRID_ROWS,
-        CFG_MAX_PANELS, CFG_MAX_TERMS,
+        CFG_MAX_PANELS, CFG_MAX_TERMS, CFG_MAX_SCREENS,
         ek, ef, er, ea, eo);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 
@@ -617,6 +618,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "  \"fields\": {\n"
 "    \"panel.sel\":      \"mirror of terms[0].sel; written by the device, ignored on input\",\n"
 "    \"panel.col/row\":  \"top-left cell; col+w and row+h must stay inside the grid\",\n"
+"    \"panel.screen\":   \"which page the tile is on, swiped between; must be < the length of screens[]\",\n"
 "    \"panel.w/h\":      \"span in cells; a widget below its minimum is refused (chart and histogram need 2x2, multi needs 2x1)\",\n"
 "    \"panel.op\":       \"share = a/(a+b), ratio = a/b, diff = a-b, sum = a+b+...; none means a single term\",\n"
 "    \"panel.vmin/vmax\":\"gauge and bar range; null means auto\",\n"
@@ -633,6 +635,8 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"An all-time quantile on a long-lived process stops moving; set window_s.\",\n"
 "    \"A counter whose exporter updates on a log interval steps rather than flows; a window smooths it.\",\n"
 "    \"A push is applied whole or rejected, and the error names the offending panel.\"\n"
+"    ,\"Cells are per screen, so two panels may share col/row if their screen differs.\"\n"
+"    ,\"Every screen's panels are polled whether or not it is the one on display, so a page is warm when you swipe to it.\"\n"
 "  ],\n"
 "  \"example\": { \"title\": \"prefix hit rate\", \"kind\": \"gauge\", \"fmt\": \"percent\",\n"
 "    \"op\": \"share\", \"col\": 0, \"row\": 0, \"w\": 1, \"h\": 1,\n"

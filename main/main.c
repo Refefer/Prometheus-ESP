@@ -167,10 +167,23 @@ static lv_obj_t    *s_holes[GRID_COLS * GRID_ROWS];
 static int          s_hole_n;
 static lv_obj_t    *s_hdr_title;
 static lv_obj_t    *s_hdr_status;
+static lv_obj_t    *s_fbar;
 static lv_obj_t    *s_ftr_left;
 static lv_obj_t    *s_ftr_right;
 static lv_obj_t    *s_empty;
 static uint32_t     s_seen_gen = UINT32_MAX;
+
+/*
+ * The screen on display, and the dots that say which one it is.
+ *
+ * Screens are not a list you maintain -- they are wherever panels are. A
+ * screen exists because something is on it, and the page after the last one
+ * always exists while there is panel budget left, so a new screen is made by
+ * swiping to it and tapping a cell rather than by finding an Add button.
+ */
+static uint8_t      s_screen;
+static lv_obj_t    *s_dots[CFG_MAX_SCREENS];
+static int          s_dot_n;
 
 /*
  * True while a full-screen modal owns the display.
@@ -187,12 +200,78 @@ static bool modal_open(void)
            ui_layouts_is_open();
 }
 
+/* One past the highest screen anything sits on. Always at least 1. */
+static int screens_used(void)
+{
+    const config_t *c = config_get();
+    int hi = 0;
+    for (int i = 0; i < c->n_panels; i++) {
+        if (!c->panels[i].sel[0]) continue;
+        if (c->panels[i].screen >= hi) hi = c->panels[i].screen + 1;
+    }
+    return hi > 0 ? hi : 1;
+}
+
+static int panels_live(void)
+{
+    const config_t *c = config_get();
+    int n = 0;
+    for (int i = 0; i < c->n_panels; i++) if (c->panels[i].sel[0]) n++;
+    return n;
+}
+
+/*
+ * Pages you can swipe to: the screens in use, plus one empty page to grow
+ * into while both the panel budget and the screen limit allow it.
+ */
+static int screens_navigable(void)
+{
+    int used = screens_used();
+    bool room = panels_live() < CFG_MAX_PANELS && used < CFG_MAX_SCREENS;
+    return room ? used + 1 : used;
+}
+
+/*
+ * Page dots.
+ *
+ * Rebuilt rather than restyled because the count changes: filling the last
+ * empty screen grows the strip by one, and emptying a screen shrinks it.
+ * There are at most six.
+ */
+static void build_dots(void)
+{
+    for (int i = 0; i < s_dot_n; i++) if (s_dots[i]) lv_obj_del(s_dots[i]);
+    s_dot_n = 0;
+
+    int n = screens_navigable();
+    if (n < 2 || s_fbar == NULL) return;   /* one page needs no indicator */
+
+    /* Parented to the footer strip, not the screen: lv_obj_create appends,
+     * so dots made after a rebuild would otherwise be drawn over by the
+     * strip -- or under it, depending on which ran last. */
+    const lv_coord_t pitch = 16, d = 8;
+    lv_coord_t x0 = SCR_W / 2 - (n * pitch) / 2;
+    for (int i = 0; i < n && i < CFG_MAX_SCREENS; i++) {
+        bool here = (i == s_screen);
+        lv_coord_t sz = here ? d + 2 : d;
+        lv_obj_t *o = make_dot(s_fbar, sz, here ? COL_ACCENT : COL_LINE);
+        lv_obj_set_pos(o, x0 + i * pitch, (FOOTER_H - sz) / 2);
+        s_dots[s_dot_n++] = o;
+    }
+}
+
 static void build_tiles(lv_obj_t *scr)
 {
     if (modal_open()) {
         /* Deferred: every modal rebuilds on close, so nothing is lost. */
         return;
     }
+
+    /* Screens come and go with their panels, so the one on display can stop
+     * existing while you are looking at it -- emptying it, or activating a
+     * layout with fewer screens. */
+    int nav = screens_navigable();
+    if ((int)s_screen >= nav) s_screen = (uint8_t)(nav - 1);
 
     for (int i = 0; i < s_tile_n; i++) {
         if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
@@ -203,7 +282,7 @@ static void build_tiles(lv_obj_t *scr)
     for (int i = 0; i < c->n_panels && s_tile_n < CFG_MAX_PANELS; i++) {
         const cfg_panel_t *p = &c->panels[i];
         if (p->sel[0] == '\0') continue;
-        if (p->screen != 0) continue;      /* one screen for now */
+        if (p->screen != s_screen) continue;
 
         tile_spec_t *sp = &s_specs[s_tile_n];
         memset(sp, 0, sizeof(*sp));
@@ -231,7 +310,7 @@ static void build_tiles(lv_obj_t *scr)
     memset(used, 0, sizeof(used));
     for (int i = 0; i < c->n_panels; i++) {
         const cfg_panel_t *p = &c->panels[i];
-        if (!p->sel[0] || p->screen != 0) continue;
+        if (!p->sel[0] || p->screen != s_screen) continue;
         uint8_t pw = p->w ? p->w : 1, ph = p->h ? p->h : 1;
         for (int r = p->row; r < p->row + ph && r < GRID_ROWS; r++) {
             for (int cc = p->col; cc < p->col + pw && cc < GRID_COLS; cc++) {
@@ -272,6 +351,12 @@ static void build_tiles(lv_obj_t *scr)
     /* With outlines showing, an empty screen no longer reads as a fault, so
      * the hint only needs to explain the gesture once. */
     hidden_if_changed(s_empty, s_tile_n > 0);
+    if (s_tile_n == 0) {
+        label_set_if_changed(s_empty, s_screen > 0
+            ? "New screen -- tap a  +  to put something here"
+            : "Tap a  +  to choose what goes there");
+    }
+    build_dots();
 }
 
 /* A tap on a tile opens its settings; closing them rebuilds, since the widget
@@ -292,25 +377,61 @@ static void hole_filled(uint16_t panel_id)
 static void hole_tapped(lv_event_t *e)
 {
     uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    ui_browser_open_pick((uint8_t)(packed >> 8), (uint8_t)(packed & 0xFF),
-                         hole_filled);
+    ui_browser_open_pick(s_screen, (uint8_t)(packed >> 8),
+                         (uint8_t)(packed & 0xFF), hole_filled);
 }
 
 static void browse_cb(lv_event_t *e)
 {
     (void)e;
-    ui_browser_open(browser_closed);
+    ui_browser_open(s_screen, browser_closed);
 }
 
 static void layouts_closed(void)
 {
-    /* Activating a layout replaces every panel, so the watch list and the
-     * tiles both have to be rebuilt -- in that order, since slot i must
-     * still be tile i. */
+    /* Activating a layout replaces every panel, so both sides rebuild. The
+     * order no longer matters -- tiles find their numbers by panel id. */
     poller_reload();
+    s_screen = 0;
     build_tiles(lv_scr_act());
     set_hdr_title();
     s_seen_gen = UINT32_MAX;
+}
+
+/*
+ * Swipe left for the next screen, right for the previous.
+ *
+ * LVGL delivers a gesture to the first ancestor of the touched object without
+ * GESTURE_BUBBLE, and every modal root clears that flag, so a swipe inside a
+ * sheet stops there and only the dashboard pages.
+ */
+static void go_to_screen(int idx)
+{
+    int n = screens_navigable();
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    if (idx == (int)s_screen) return;
+    s_screen = (uint8_t)idx;
+    build_tiles(lv_scr_act());
+    s_seen_gen = UINT32_MAX;        /* repaint from the next snapshot */
+}
+
+static void gesture_cb(lv_event_t *e)
+{
+    (void)e;
+    if (modal_open() || ui_kbd_is_open()) return;
+
+    lv_indev_t *indev = lv_indev_get_act();
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir != LV_DIR_LEFT && dir != LV_DIR_RIGHT) return;
+
+    /*
+     * Without this the release at the end of the swipe also fires CLICKED on
+     * whatever the finger started over, so paging across a tile would open
+     * that tile's settings every time.
+     */
+    lv_indev_wait_release(indev);
+    go_to_screen((int)s_screen + (dir == LV_DIR_LEFT ? 1 : -1));
 }
 
 static void layouts_cb(lv_event_t *e)
@@ -376,9 +497,6 @@ static void build_dashboard(void)
     lv_obj_set_style_text_align(s_empty, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_empty, LV_ALIGN_BOTTOM_MID, 0, -FOOTER_H - 4);
 
-    tile_set_tap_handler(tile_tapped);
-    build_tiles(scr);
-
     /*
      * A filled strip rather than a rule.
      *
@@ -388,10 +506,10 @@ static void build_dashboard(void)
      * strip separates the zone without drawing anything that could be
      * mistaken for a control.
      */
-    lv_obj_t *fbar = make_panel(scr);
-    lv_obj_set_size(fbar, SCR_W, FOOTER_H);
-    lv_obj_set_pos(fbar, 0, FOOTER_Y);
-    lv_obj_set_style_bg_color(fbar, COL_PANEL, 0);
+    s_fbar = make_panel(scr);
+    lv_obj_set_size(s_fbar, SCR_W, FOOTER_H);
+    lv_obj_set_pos(s_fbar, 0, FOOTER_Y);
+    lv_obj_set_style_bg_color(s_fbar, COL_PANEL, 0);
 
     /* Centred in the strip: (26 - 15) / 2 leaves equal air above and below. */
     const lv_coord_t ftext_y = FOOTER_Y + (FOOTER_H - 15) / 2;
@@ -401,6 +519,12 @@ static void build_dashboard(void)
 
     s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
     lv_obj_set_pos(s_ftr_right, SCR_W - 330, ftext_y);
+
+    lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
+
+    tile_set_tap_handler(tile_tapped);
+    build_tiles(scr);
+
 }
 
 static void rebuild_dashboard(void)
@@ -410,8 +534,7 @@ static void rebuild_dashboard(void)
 
 static void browser_closed(void)
 {
-    /* Selections changed: rebuild both sides of the mapping, in this order,
-     * so the poller's slot i still corresponds to tile i. */
+    /* Selections changed: ask for a fresh watch list and redraw. */
     poller_reload();
     build_tiles(lv_scr_act());
     s_seen_gen = UINT32_MAX;     /* force a repaint from the next snapshot */
@@ -468,8 +591,25 @@ static void dashboard_tick(lv_timer_t *timer)
 
     if (snap.generation != s_seen_gen) {
         s_seen_gen = snap.generation;
-        for (int i = 0; i < snap.n && i < s_tile_n; i++) {
-            const poller_metric_t *m = &snap.m[i];
+        /*
+         * Matched by panel id, not by position.
+         *
+         * The poller watches every screen's panels while the tiles cover only
+         * the screen on display, so the two lists have different lengths and
+         * different orders. Pairing them by index -- which this used to do --
+         * would put one metric's numbers under another metric's title.
+         */
+        for (int t = 0; t < s_tile_n; t++) {
+            const poller_metric_t *m = NULL;
+            for (int i = 0; i < snap.n; i++) {
+                if (snap.m[i].panel_id == s_specs[t].panel_id) {
+                    m = &snap.m[i];
+                    break;
+                }
+            }
+            /* No slot yet: the poller rebuilds on its next cycle, and the
+             * tile keeps what it last showed rather than flashing empty. */
+            if (m == NULL) continue;
             tile_data_t d = {
                 .valid        = m->valid,
                 .warming      = m->warming,
@@ -494,7 +634,7 @@ static void dashboard_tick(lv_timer_t *timer)
                 .child_num    = m->child_num,
                 .child_order  = m->child_order,
             };
-            tile_update(s_tiles[i], &d);
+            tile_update(s_tiles[t], &d);
         }
 
         char ip[16] = ""; int8_t rssi = 0;

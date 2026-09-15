@@ -21,6 +21,9 @@ static lv_obj_t *s_op_btn[5], *s_selb_lbl;
 static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
 static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
 static lv_obj_t *s_pos_lbl;
+static lv_obj_t *s_scr_lbl;
+
+static int screens_reachable(void);
 static lv_obj_t *s_map_cell[GRID_ROWS][GRID_COLS];
 static uint16_t  s_id;
 static void (*s_on_close)(void);
@@ -140,6 +143,8 @@ static void refresh(void)
 
     label_set_fmt_if_changed(s_pos_lbl, "col %u  row %u   %ux%u",
                              p->col, p->row, p->w ? p->w : 1, p->h ? p->h : 1);
+    label_set_fmt_if_changed(s_scr_lbl, "%u / %d", p->screen + 1,
+                             screens_reachable());
 
     /*
      * A miniature of the grid, so a move is visible without repainting the
@@ -347,6 +352,49 @@ static void map_cb(lv_event_t *e)
         ui_toast(msg, SEV_WARN, 2500);
         return;
     }
+    refresh();
+}
+
+/*
+ * Screens a tile can move to: the ones in use, plus one beyond, so a second
+ * screen is made by moving something onto it. Derived from where the panels
+ * actually are rather than from the stored screen list, which is the same
+ * rule the dashboard pages by.
+ */
+static int screens_reachable(void)
+{
+    const config_t *c = config_get();
+    int hi = 1;
+    for (int i = 0; i < c->n_panels; i++) {
+        if (c->panels[i].sel[0] && c->panels[i].screen + 1 > hi) {
+            hi = c->panels[i].screen + 1;
+        }
+    }
+    return hi < CFG_MAX_SCREENS ? hi + 1 : CFG_MAX_SCREENS;
+}
+
+static void screen_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    int d = (int)(intptr_t)lv_event_get_user_data(e);
+    int want = (int)p->screen + d;
+    if (want < 0 || want >= screens_reachable()) return;
+
+    if (!config_ensure_screen((uint8_t)want)) return;
+
+    uint8_t was_screen = p->screen, was_col = p->col, was_row = p->row;
+    p->screen = (uint8_t)want;
+    /* Keep the same cell when it is free over there, since that is the least
+     * surprising outcome; otherwise take the first slot that fits. */
+    if (!config_panel_fits(p, p->col, p->row) && !config_place_panel(p)) {
+        p->screen = was_screen;
+        p->col = was_col;
+        p->row = was_row;
+        ui_toast("No room on that screen", SEV_WARN, 2200);
+        return;
+    }
+    config_touch();
     refresh();
 }
 
@@ -570,6 +618,25 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
             s_map_cell[r][cc] = cell;
         }
     }
+
+    /* Which screen the tile lives on. Without this a tile placed on a second
+     * screen could only be deleted, never brought back. */
+    lv_obj_t *scap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(scap, "Screen");
+    lv_obj_align(scap, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 490, -62);
+
+    lv_obj_t *sprev = make_btn(s_root, LV_SYMBOL_LEFT, screen_cb,
+                               (void *)(intptr_t)-1);
+    lv_obj_set_size(sprev, 40, BTN_H);
+    lv_obj_align(sprev, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 490, -12);
+
+    s_scr_lbl = make_label(s_root, FONT_M, COL_TEXT);
+    lv_obj_align(s_scr_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 540, -22);
+
+    lv_obj_t *snext = make_btn(s_root, LV_SYMBOL_RIGHT, screen_cb,
+                               (void *)(intptr_t)1);
+    lv_obj_set_size(snext, 40, BTN_H);
+    lv_obj_align(snext, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 575, -12);
 
     lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove", remove_cb, NULL);
     lv_obj_set_size(rm, 180, BTN_H);

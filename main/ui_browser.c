@@ -87,6 +87,10 @@ static void (*s_on_close)(void);
 static bool     s_pick_mode;
 static bool     s_picked;
 static uint8_t  s_pick_col, s_pick_row;
+/* Which screen anything created here lands on. Everything that asks "is this
+ * cell free" has to ask it about the same screen, or a tile is placed on top
+ * of one the user cannot see. */
+static uint8_t  s_screen;
 static void   (*s_on_pick)(uint16_t panel_id);
 static bool     s_select_mode;
 static void   (*s_on_select)(const char *sel);
@@ -302,14 +306,14 @@ static void refilter(void)
     if (s_page >= pages) s_page = pages > 0 ? pages - 1 : 0;
 }
 
-/* Cells occupied on screen 0, so capacity is visible while picking rather
- * than discovered by a refusal. */
+/* Cells occupied on the target screen, so capacity is visible while picking
+ * rather than discovered by a refusal. */
 static int cells_used(void)
 {
     const config_t *c = config_get();
     int n = 0;
     for (int i = 0; i < c->n_panels; i++) {
-        if (!c->panels[i].sel[0] || c->panels[i].screen != 0) continue;
+        if (!c->panels[i].sel[0] || c->panels[i].screen != s_screen) continue;
         n += (c->panels[i].w ? c->panels[i].w : 1) *
              (c->panels[i].h ? c->panels[i].h : 1);
     }
@@ -323,7 +327,7 @@ static bool cell_span_free(const cfg_panel_t *me, uint8_t col, uint8_t row)
     const config_t *c = config_get();
     for (int i = 0; i < c->n_panels; i++) {
         const cfg_panel_t *o = &c->panels[i];
-        if (o == me || !o->sel[0] || o->screen != 0) continue;
+        if (o == me || !o->sel[0] || o->screen != s_screen) continue;
         uint8_t ow = o->w ? o->w : 1, oh = o->h ? o->h : 1;
         bool overlap = !(col + me->w <= o->col || o->col + ow <= col ||
                          row + me->h <= o->row || o->row + oh <= row);
@@ -346,7 +350,10 @@ static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
     cfg_panel_t *p = config_panel_add();
     if (p == NULL) return 0;
 
-    p->ep_id = ep_id();
+    p->ep_id  = ep_id();
+    /* The screen has to exist before a panel can name it. */
+    if (!config_ensure_screen(s_screen)) { config_panel_remove(p->id); return 0; }
+    p->screen = s_screen;
     cfg_term_t *t0 = config_term0(p);
     strncpy(t0->sel, e->sel[0] ? e->sel : e->name, sizeof(t0->sel) - 1);
     /* A selector chosen from the browser names ONE label set, so summing over
@@ -762,10 +769,11 @@ static void close_cb(lv_event_t *e)
 
 static void browser_build(const char *heading);
 
-void ui_browser_open_pick(uint8_t col, uint8_t row,
+void ui_browser_open_pick(uint8_t screen, uint8_t col, uint8_t row,
                           void (*on_pick)(uint16_t panel_id))
 {
     if (s_root) return;
+    s_screen      = screen;
     s_pick_mode   = true;
     s_select_mode = false;
     s_picked      = false;
@@ -787,9 +795,10 @@ void ui_browser_open_select(void (*on_select)(const char *sel))
     browser_build("Pick the other series");
 }
 
-void ui_browser_open(void (*on_close)(void))
+void ui_browser_open(uint8_t screen, void (*on_close)(void))
 {
     if (s_root) return;
+    s_screen      = screen;
     s_pick_mode   = false;
     s_select_mode = false;
     s_on_close = on_close;

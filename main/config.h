@@ -227,6 +227,14 @@ bool         config_has_panel(uint16_t ep_id, const char *sel);
 
 /* Place a new panel in the first free cell of its screen, or return false if
  * the screen is full. Spans come from the renderer's natural size. */
+/*
+ * Grows the screen list so `idx` names a real screen, and returns false if
+ * that is beyond the limit. Panels may only name a screen that exists -- the
+ * loader rejects a config where one does not -- so anything placing a panel
+ * on a new screen has to call this first.
+ */
+bool config_ensure_screen(uint8_t idx);
+
 bool config_place_panel(cfg_panel_t *p);
 
 /*

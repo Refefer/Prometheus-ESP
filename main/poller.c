@@ -78,6 +78,10 @@ _Static_assert(sizeof(poller_snap_t) < 12 * 1024,
                "poller_snap_t is large; every holder must be static, never a "
                "stack local -- see publish() and dashboard_tick()");
 
+static void reload_watches(void);
+/* Set by poller_reload() from any task; acted on by the scrape loop. */
+static volatile bool s_reload_req;
+
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 /* The parser takes its allocator by injection so the host tests can use plain
@@ -414,6 +418,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
     for (int i = 0; i < s_watch_n; i++) {
         watch_rt_t      *w = &s_watch[i];
         poller_metric_t *m = &next.m[i];
+        m->panel_id = w->panel_id;
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;
@@ -653,9 +658,10 @@ static void poller_task(void *arg)
         /* A pushed config lands on the HTTP task; picking it up here means the
          * watch list is only ever rewritten by the task that reads it. */
         uint32_t g = config_generation();
-        if (g != s_cfg_gen) {
+        if (g != s_cfg_gen || s_reload_req) {
             s_cfg_gen = g;
-            poller_reload();
+            s_reload_req = false;
+            reload_watches();
         }
 
         if (!wifi_mgr_is_connected()) {
@@ -746,7 +752,7 @@ esp_err_t poller_start(const char *url, int interval_s)
     if (s_mux == NULL) return ESP_ERR_NO_MEM;
 
     strncpy(s_snap.status, "starting", sizeof(s_snap.status) - 1);
-    poller_reload();
+    reload_watches();          /* before the task exists, so no race */
 
     /* Core 0, above the LVGL task's priority 2 on core 1: network work
      * preempts nothing that draws. 8KB covers TLS handshake depth with room. */
@@ -802,7 +808,15 @@ static bool selector_has_glob(const prom_label_t *l, uint8_t n)
  * every counter on the screen to "warming up" and blank the rates for a full
  * window, which looks exactly like a fault.
  */
-void poller_reload(void)
+/*
+ * Rebuilds the watch list. Poller task only.
+ *
+ * The public entry below just raises a flag, because this walks every panel
+ * and rewrites s_watch in place -- doing that from the LVGL task while a
+ * scrape is committing on core 0 is a data race with no symptom until a tile
+ * shows another metric's numbers.
+ */
+static void reload_watches(void)
 {
     const config_t *c = config_get();
 
@@ -833,10 +847,14 @@ void poller_reload(void)
     for (int i = 0; i < c->n_panels && s_watch_n < POLLER_MAX_WATCH; i++) {
         const cfg_panel_t *p = &c->panels[i];
         if (p->n_terms == 0 || p->terms[0].sel[0] == '\0') continue;
-        /* Must use the SAME predicate as the dashboard's tile builder: slot i
-         * here is tile i there, and a mismatch silently pairs a tile with
-         * another metric's numbers. */
-        if (p->screen != 0) continue;
+        /*
+         * Every panel, not just the visible screen's.
+         *
+         * A counter needs a baseline before it can show a rate, so a screen
+         * whose watches only start when you swipe to it greets you with a row
+         * of "warming up" every time. Watching them all costs one extra pass
+         * over an already-parsed scrape and nothing on the wire.
+         */
 
         watch_rt_t *w = &s_watch[s_watch_n];
         w->panel_id = p->id;
@@ -898,3 +916,13 @@ uint32_t poller_generation(void)
 {
     return s_snap.generation;   /* a torn read only costs one extra repaint */
 }
+
+/*
+ * Asks for a rebuild from whichever task noticed the config changed.
+ *
+ * A flag rather than the work itself: the scrape loop owns s_watch, and the
+ * UI calling in would rewrite it mid-scrape. Tiles find their numbers by
+ * panel id, so the one cycle of lag shows a tile as warming up rather than
+ * showing it the wrong metric.
+ */
+void poller_reload(void) { s_reload_req = true; }
