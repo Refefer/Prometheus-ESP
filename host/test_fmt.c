@@ -220,12 +220,31 @@ static void test_nonfinite(void)
  * disappears from the tile. This sweeps a wide range of inputs and modes to
  * hold that invariant.
  */
+static void test_rate_hour(void)
+{
+    printf("per-hour rates\n");
+
+    /* The value on the wire is per second; only the display scales. */
+    EQ(1.0,   FMT_RATE_HOUR, "", "3.60 k/h");
+
+    /* 333 tok/s is the number you cannot reason about; 1.2 M/h is the one you
+     * can. That is the whole reason the mode exists. */
+    EQ(333.0, FMT_RATE_HOUR, "", "1.20 M/h");
+
+    /* The same value in both units, so a mix-up shows up here rather than on
+     * the glass as a number 3600x too large. */
+    EQ(333.0, FMT_RATE_SI,   "", "333 /s");
+
+    EQ(0.0,   FMT_RATE_HOUR, "", "0.000 /h");
+}
+
 static void test_charset_invariant(void)
 {
     printf("digits-only font charset invariant\n");
     static const char *allowed = " !%+,-./0123456789:";
     const fmt_mode_t modes[] = { FMT_RAW, FMT_SI, FMT_IEC, FMT_PCT_01,
-                                 FMT_PCT_100, FMT_RATE_SI, FMT_RATE_IEC };
+                                 FMT_PCT_100, FMT_RATE_SI, FMT_RATE_IEC,
+                                 FMT_RATE_HOUR };
     const double vals[] = {
         0.0, 1.0, -1.0, 0.5, 1e-9, 1e-6, 1e-3, 999.0, 1000.0, 1024.0,
         1e6, 1.2345678e13, 1e18, -4096.0, 0.0042, 123456.789,
@@ -292,6 +311,7 @@ int main(void)
     test_duration();
     test_percent_delta();
     test_nonfinite();
+    test_rate_hour();
     test_charset_invariant();
     test_infer();
     printf("\n%d checks, %d failures\n", g_ran, g_fail);

@@ -70,7 +70,7 @@ static const enum_name_t k_fmts[] = {
     { FMT_IEC, "bytes" }, { FMT_PCT_01, "percent" },
     { FMT_PCT_100, "percent100" }, { FMT_DURATION, "duration" },
     { FMT_RATE_SI, "rate" }, { FMT_RATE_IEC, "rate_bytes" },
-    { FMT_BOOL, "bool" }, { 0, NULL },
+    { FMT_BOOL, "bool" }, { FMT_RATE_HOUR, "rate_hour" }, { 0, NULL },
 };
 static const enum_name_t k_reduces[] = {
     { RED_SUM, "sum" }, { RED_AVG, "avg" }, { RED_MIN, "min" },

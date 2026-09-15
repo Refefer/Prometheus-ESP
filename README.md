@@ -83,6 +83,19 @@ name, type, how many label sets, and a sample selector to copy. That is the
 half `/schema` cannot provide: the format is knowable from the firmware, but
 which metrics exist is not.
 
+### Windows
+
+`term.window_s` is the span a rate or quantile covers, and it means what it
+says at any size. The ring holds a fixed number of baselines and spaces them
+at `window_s / (slots - 1)`, so a one-hour window reaches back an hour rather
+than as far as the last two dozen polls happened to reach. It resolves the
+window's start to within one spacing; the current value is never affected,
+since only the baseline comes from the ring.
+
+`fmt: "rate_hour"` renders a per-second rate as a per-hour quantity. The value
+on the wire is unchanged -- it is a unit, for the questions that are about
+volume rather than speed.
+
 ### Screens
 
 A tile carries a `screen`, and swiping pages between them. Screens are not a

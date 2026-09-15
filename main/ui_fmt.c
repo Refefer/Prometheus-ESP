@@ -192,8 +192,12 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
         return;
     }
 
+    case FMT_RATE_HOUR:
     case FMT_SI:
     case FMT_RATE_SI: {
+        /* Same SI ladder, an hour's worth of it. Scaling before the prefix is
+         * picked is what makes 333/s read as 1.20 M/h rather than 1200 k/h. */
+        if (mode == FMT_RATE_HOUR) v *= 3600.0;
         double scaled = v;
         int e = pick_exp(v, 1000.0, SI_MIN, SI_MAX, st, &scaled);
         int dp = decimals_tracked(scaled, st);
@@ -202,7 +206,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
         char u[16];
         snprintf(u, sizeof(u), "%s%s%s", k_si[e + SI_ZERO],
                  base_unit ? base_unit : "",
-                 mode == FMT_RATE_SI ? "/s" : "");
+                 mode == FMT_RATE_SI ? "/s" : mode == FMT_RATE_HOUR ? "/h" : "");
         safe_copy(suffix, suffix_cap, u);
         return;
     }

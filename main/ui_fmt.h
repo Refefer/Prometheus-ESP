@@ -29,6 +29,15 @@ typedef enum {
     FMT_RATE_SI,    /* SI + "/s" */
     FMT_RATE_IEC,   /* IEC + "/s" */
     FMT_BOOL,       /* 0/1 -> DOWN/UP */
+    /*
+     * A per-second rate shown as a per-hour quantity.
+     *
+     * The value on the wire is still per second -- this only changes the
+     * scale and the suffix. It exists because "how many tokens went through
+     * in the last hour" is a question about volume, and 1.2M/h answers it
+     * where 333/s does not.
+     */
+    FMT_RATE_HOUR,
     FMT_MODE_COUNT,
 } fmt_mode_t;
 

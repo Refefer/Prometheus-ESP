@@ -77,11 +77,21 @@ static severity_t severity_of(const tile_spec_t *spec, const tile_data_t *d)
     return SEV_OK;
 }
 
-static void clear_clickable(lv_obj_t *o)
+static void make_inert(lv_obj_t *o)
 {
     lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    /*
+     * And nothing inside a tile scrolls, ever.
+     *
+     * A scrollable ancestor claims the drag before gesture detection runs, so
+     * a chart wide enough to scroll would eat the swipe on exactly the tiles
+     * a finger is most likely to start on. lv_chart and lv_bar are scrollable
+     * by default, same as they are clickable by default.
+     */
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_OFF);
     uint32_t n = lv_obj_get_child_cnt(o);
-    for (uint32_t i = 0; i < n; i++) clear_clickable(lv_obj_get_child(o, i));
+    for (uint32_t i = 0; i < n; i++) make_inert(lv_obj_get_child(o, i));
 }
 
 tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
@@ -125,7 +135,8 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
     if (t->vt->build) t->vt->build(t, t->body);
 
     /*
-     * The shell owns the tap, so nothing inside may claim it.
+     * The shell owns the tap and the page owns the swipe, so nothing inside
+     * may claim either.
      *
      * lv_obj_create sets LV_OBJ_FLAG_CLICKABLE by default in LVGL 8, and so
      * do lv_bar and lv_chart -- so the body, which covers everything below
@@ -133,7 +144,7 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
      * Sweeping the subtree means a renderer cannot reintroduce this by adding
      * a widget, which is how it got here in the first place.
      */
-    clear_clickable(t->body);
+    make_inert(t->body);
 
     /*
      * A child that extends past the body is silently CLIPPED -- it simply

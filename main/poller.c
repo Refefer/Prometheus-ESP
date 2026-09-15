@@ -357,15 +357,34 @@ static double term_value(term_rt_t *tm, int64_t t, bool *warming, bool *restarte
         /* Windowed rate: difference against the oldest sample still inside
          * the window, so a counter that only updates on its exporter's log
          * interval reads steadily instead of alternating zero and spike. */
-        if (tm->win_n > 0 &&
-            v < tm->win_v[(tm->win_head + TERM_WIN_MAX - 1) % TERM_WIN_MAX]) {
+        uint8_t newest = (uint8_t)((tm->win_head + TERM_WIN_MAX - 1) % TERM_WIN_MAX);
+        if (tm->win_n > 0 && v < tm->win_v[newest]) {
             tm->win_n = 0; tm->win_valid = false;
             *restarted = true;
         }
-        tm->win_v[tm->win_head] = v;
-        tm->win_t[tm->win_head] = t;
-        tm->win_head = (uint8_t)((tm->win_head + 1) % TERM_WIN_MAX);
-        if (tm->win_n < TERM_WIN_MAX) tm->win_n++;
+
+        /*
+         * Stored at the window's own spacing, not once per poll.
+         *
+         * The ring holds baselines, and there are TERM_WIN_MAX of them. Store
+         * every poll and the ring reaches back poll_interval * 24 -- about
+         * two minutes here -- so asking for a one-hour window would silently
+         * have given a two-minute one under an hourly label. Spacing the
+         * stores at window_s / (TERM_WIN_MAX - 1) makes the ring span any
+         * window asked for, at the cost of resolving the window's start to
+         * within one spacing. The current value is never affected: only the
+         * baseline comes from the ring.
+         *
+         * For the short windows this already handled, the spacing lands below
+         * the poll interval and every poll is stored exactly as before.
+         */
+        int64_t spacing = ((int64_t)tm->window_s * 1000) / (TERM_WIN_MAX - 1);
+        if (tm->win_n == 0 || (t - tm->win_t[newest]) >= spacing) {
+            tm->win_v[tm->win_head] = v;
+            tm->win_t[tm->win_head] = t;
+            tm->win_head = (uint8_t)((tm->win_head + 1) % TERM_WIN_MAX);
+            if (tm->win_n < TERM_WIN_MAX) tm->win_n++;
+        }
 
         int64_t cutoff = t - (int64_t)tm->window_s * 1000;
         int best = -1;

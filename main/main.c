@@ -412,6 +412,7 @@ static void go_to_screen(int idx)
     if (idx >= n) idx = n - 1;
     if (idx == (int)s_screen) return;
     s_screen = (uint8_t)idx;
+    ESP_LOGI(TAG, "screen %d of %d", idx + 1, n);
     build_tiles(lv_scr_act());
     s_seen_gen = UINT32_MAX;        /* repaint from the next snapshot */
 }
@@ -461,6 +462,25 @@ static void build_dashboard(void)
 {
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
+
+    /*
+     * The screen does not scroll. Two symptoms came from leaving it able to.
+     *
+     * A screen is scrollable by default, and the footer strip and the header
+     * divider are the full 800px, so with any padding at all the content
+     * overflows and LVGL has something to scroll. It then draws a horizontal
+     * scrollbar along the bottom -- last, over the footer strip and through
+     * the "updated ... ago" text -- which is the line that looked like a
+     * swipe affordance, and it was never the divider that got replaced.
+     *
+     * Worse, a scrollable ancestor claims the drag: indev_gesture() returns
+     * immediately when scroll_obj is set (lv_indev.c:1121), so the swipe
+     * between screens was being swallowed before a direction was ever
+     * computed. One flag, both bugs.
+     */
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(scr, 0, 0);
 
     s_hdr_title = make_label(scr, FONT_L, COL_TEXT);
     lv_obj_set_pos(s_hdr_title, GRID_MX, 8);

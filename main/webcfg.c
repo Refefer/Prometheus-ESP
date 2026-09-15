@@ -129,6 +129,30 @@ static esp_err_t get_config(httpd_req_t *req)
     return ESP_OK;
 }
 
+/*
+ * Writes the config to flash before the response goes out.
+ *
+ * Everything on the glass writes through a debounced flush, because ticking
+ * forty checkboxes should not mean forty flash writes. A push is the opposite
+ * shape: one atomic document, acknowledged once. Leaving it to the debounce
+ * meant a 200 promised nothing -- a reset inside the next two seconds lost
+ * the whole push, which is exactly how this was found. Something driving this
+ * API cannot see the debounce, so the acknowledgement has to mean it landed.
+ */
+static bool persist(httpd_req_t *req)
+{
+    esp_err_t rc = config_flush_sync();
+    if (rc == ESP_OK) return true;
+
+    ESP_LOGE(TAG, "applied but could not save: %s", esp_err_to_name(rc));
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+        "{\"error\":\"applied to the running panel but could not be saved; "
+        "it will not survive a restart\"}\n");
+    return false;
+}
+
 static esp_err_t post_config(httpd_req_t *req)
 {
     if (!authorised(req)) return deny(req);
@@ -179,6 +203,8 @@ static esp_err_t post_config(httpd_req_t *req)
         httpd_resp_sendstr(req, out);
         return ESP_OK;
     }
+
+    if (!persist(req)) return ESP_OK;
 
     const config_t *c = config_get();
     ESP_LOGI(TAG, "applied a pushed config: %u panels, %u endpoints",
@@ -290,6 +316,7 @@ static esp_err_t layouts_post(httpd_req_t *req)
             httpd_resp_sendstr(req, "{\"error\":\"no such layout\"}\n");
             return ESP_OK;
         }
+        if (!persist(req)) return ESP_OK;
         char out[128];
         snprintf(out, sizeof(out), "{\"ok\":true,\"active\":\"%s\",\"panels\":%u}\n",
                  name, (unsigned)config_get()->n_panels);
@@ -304,6 +331,7 @@ static esp_err_t layouts_post(httpd_req_t *req)
                 "{\"error\":\"name must be letters, digits, - or _\"}\n");
             return ESP_OK;
         }
+        if (!persist(req)) return ESP_OK;
         char out[128];
         snprintf(out, sizeof(out), "{\"ok\":true,\"saved\":\"%s\"}\n", name);
         httpd_resp_sendstr(req, out);
@@ -342,6 +370,7 @@ static esp_err_t layouts_post(httpd_req_t *req)
         return ESP_OK;
     }
     config_layout_save(name);
+    if (!persist(req)) return ESP_OK;
 
     char out[144];
     snprintf(out, sizeof(out), "{\"ok\":true,\"active\":\"%s\",\"panels\":%u}\n",
@@ -362,6 +391,9 @@ static esp_err_t layouts_delete(httpd_req_t *req)
         httpd_resp_sendstr(req, "{\"error\":\"no such layout\"}\n");
         return ESP_OK;
     }
+    /* Deleting the active layout clears the name in the live config, so this
+     * has to reach flash too. */
+    if (!persist(req)) return ESP_OK;
     httpd_resp_sendstr(req, "{\"ok\":true}\n");
     return ESP_OK;
 }
@@ -660,7 +692,11 @@ esp_err_t webcfg_start(void)
     cfg.max_uri_handlers = 10;
     /* /layouts/<name>/<verb> needs prefix matching. */
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
-    cfg.stack_size       = 6144;    /* JSON parse happens on the caller's heap,
+    cfg.stack_size       = 8192;    /* a pushed config is written to flash on
+                                     * this task rather than handed to a
+                                     * worker, so the acknowledgement can mean
+                                     * it landed.
+                                     * JSON parse happens on the caller's heap,
                                      * not its stack, so this is ample */
     cfg.core_id          = 0;       /* keep HTTP off the rendering core */
     cfg.lru_purge_enable = true;
