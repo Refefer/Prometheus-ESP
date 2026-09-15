@@ -62,6 +62,15 @@ static poller_snap_t     s_snap;
 static char              s_url[160];
 static int               s_interval_s = 10;
 
+/*
+ * poller_snap_t is passed around by value in places and has twice now grown
+ * past a task stack after an innocuous-looking field was added to
+ * poller_metric_t. Fail the build rather than the device.
+ */
+_Static_assert(sizeof(poller_snap_t) < 12 * 1024,
+               "poller_snap_t is large; every holder must be static, never a "
+               "stack local -- see publish() and dashboard_tick()");
+
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
 /* The parser takes its allocator by injection so the host tests can use plain
@@ -162,7 +171,16 @@ static bool feed_chunk(void *ctx, const char *data, size_t len)
 static void publish(bool ok, const char *status, uint32_t latency_ms,
                     const prom_text_stats_t *st, uint64_t bytes)
 {
-    poller_snap_t next = {0};
+    /*
+     * Static, not a stack local.
+     *
+     * poller_snap_t carries every watch slot and grew to ~6KB when histogram
+     * buckets were added to each metric; this task has an 8KB stack. publish()
+     * is only ever called from the poller task, so a static is safe and costs
+     * nothing. The same growth caught dashboard_tick on the LVGL task.
+     */
+    static poller_snap_t next;
+    memset(&next, 0, sizeof(next));
     next.n          = s_watch_n;
     next.ok         = ok;
     next.latency_ms = latency_ms;
