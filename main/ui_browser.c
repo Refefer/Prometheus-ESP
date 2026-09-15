@@ -58,8 +58,15 @@ static lv_obj_t *s_row_name[ROWS_VISIBLE], *s_row_type[ROWS_VISIBLE];
 static lv_obj_t *s_row_val[ROWS_VISIBLE];
 static void (*s_on_close)(void);
 
+/* Pick-one mode: the cell the new tile should occupy. */
+static bool     s_pick_mode;
+static bool     s_picked;
+static uint8_t  s_pick_col, s_pick_row;
+static void   (*s_on_pick)(uint16_t panel_id);
+
 static void refilter(void);
 static void render_rows(void);
+static void close_cb(lv_event_t *e);
 
 /* ------------------------------------------------------------- discovery */
 
@@ -217,6 +224,22 @@ static int cells_used(void)
     return n;
 }
 
+/* True if this panel's span fits with its top-left at (col,row). */
+static bool cell_span_free(const cfg_panel_t *me, uint8_t col, uint8_t row)
+{
+    if (col + me->w > GRID_COLS || row + me->h > GRID_ROWS) return false;
+    const config_t *c = config_get();
+    for (int i = 0; i < c->n_panels; i++) {
+        const cfg_panel_t *o = &c->panels[i];
+        if (o == me || !o->sel[0] || o->screen != 0) continue;
+        uint8_t ow = o->w ? o->w : 1, oh = o->h ? o->h : 1;
+        bool overlap = !(col + me->w <= o->col || o->col + ow <= col ||
+                         row + me->h <= o->row || o->row + oh <= row);
+        if (overlap) return false;
+    }
+    return true;
+}
+
 /* ------------------------------------------------------------- selection */
 
 /*
@@ -224,10 +247,12 @@ static int cells_used(void)
  * format, aggregation and widget. This is what makes auto-discovery usable
  * rather than merely possible: the common case needs no further input.
  */
-static void add_panel_for(const cat_entry_t *e)
+/* Returns the new panel's id, or 0 if it could not be placed. */
+static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
+                              uint8_t col, uint8_t row)
 {
     cfg_panel_t *p = config_panel_add();
-    if (p == NULL) return;
+    if (p == NULL) return 0;
 
     p->ep_id = ep_id();
     strncpy(p->sel, e->sel[0] ? e->sel : e->name, sizeof(p->sel) - 1);
@@ -280,7 +305,20 @@ static void add_panel_for(const cat_entry_t *e)
     strncpy(p->title, shortname, sizeof(p->title) - 1);
     (void)n;
 
-    if (!config_place_panel(p)) {
+    if (at_cell) {
+        /*
+         * The user tapped a specific empty cell, so start there. A widget
+         * whose natural span does not fit from that corner is shrunk to 1x1
+         * rather than moved elsewhere -- landing somewhere other than where
+         * they tapped would be the surprising outcome.
+         */
+        p->col = col;
+        p->row = row;
+        if (!cell_span_free(p, col, row)) {
+            p->w = 1;
+            p->h = 1;
+        }
+    } else if (!config_place_panel(p)) {
         /*
          * No room. Refusing beats silently dropping the selection or
          * reshuffling tiles the user already arranged -- but say what would
@@ -292,9 +330,10 @@ static void add_panel_for(const cat_entry_t *e)
                  p->w, p->h, cells_used(), GRID_COLS * GRID_ROWS);
         config_panel_remove(p->id);
         ui_toast(msg, SEV_WARN, 3000);
-        return;
+        return 0;
     }
     config_touch();
+    return p->id;
 }
 
 static void remove_panel_for(const cat_entry_t *e)
@@ -317,9 +356,22 @@ static void row_cb(lv_event_t *e)
     if (idx >= s_filt_n) return;
 
     cat_entry_t *ce = &s_cat[s_filt[idx]];
+
+    if (s_pick_mode) {
+        /* One tap fills the cell and hands straight to the widget picker, so
+         * the whole flow is: tap the hole, tap the metric, choose how it
+         * looks. */
+        uint16_t id = add_panel_for(ce, true, s_pick_col, s_pick_row);
+        void (*cb)(uint16_t) = s_on_pick;
+        s_picked = true;
+        close_cb(NULL);
+        if (cb) cb(id);
+        return;
+    }
+
     const char *sel = ce->sel[0] ? ce->sel : ce->name;
     if (config_has_panel(ep_id(), sel)) remove_panel_for(ce);
-    else                                add_panel_for(ce);
+    else                                add_panel_for(ce, false, 0, 0);
     render_rows();
 }
 
@@ -468,16 +520,47 @@ static void close_cb(lv_event_t *e)
      * screen nobody is looking at is pure waste. */
     if (s_cat) { heap_caps_free(s_cat); s_cat = NULL; s_cat_n = 0; }
 
+    if (s_pick_mode) {
+        s_pick_mode = false;
+        /* In pick mode the caller is notified by row_cb, not here; reaching
+         * this point means the user backed out. */
+        void (*cb)(uint16_t) = s_on_pick;
+        s_on_pick = NULL;
+        if (cb && !s_picked) cb(0);
+        s_picked = false;
+        return;
+    }
     if (s_on_close) s_on_close();
 }
 
 /* ----------------------------------------------------------------- open */
 
 
+static void browser_build(const char *heading);
+
+void ui_browser_open_pick(uint8_t col, uint8_t row,
+                          void (*on_pick)(uint16_t panel_id))
+{
+    if (s_root) return;
+    s_pick_mode = true;
+    s_picked    = false;
+    s_pick_col  = col;
+    s_pick_row  = row;
+    s_on_pick   = on_pick;
+    s_on_close  = NULL;
+    browser_build("Pick a metric");
+}
+
 void ui_browser_open(void (*on_close)(void))
 {
     if (s_root) return;
+    s_pick_mode = false;
     s_on_close = on_close;
+    browser_build("Metrics");
+}
+
+static void browser_build(const char *heading)
+{
 
     s_cat = heap_caps_malloc(sizeof(cat_entry_t) * CAT_MAX_NAMES, MALLOC_CAP_SPIRAM);
     if (s_cat == NULL) {
@@ -500,7 +583,7 @@ void ui_browser_open(void (*on_close)(void))
     lv_obj_clear_flag(s_root, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     lv_obj_t *title = make_label(s_root, FONT_L, COL_TEXT);
-    lv_label_set_text(title, "Metrics");
+    lv_label_set_text(title, heading);
     lv_obj_set_pos(title, GRID_MX, 10);
 
     s_status = make_label(s_root, FONT_S, COL_DIM);
@@ -509,7 +592,10 @@ void ui_browser_open(void (*on_close)(void))
     s_count = make_label(s_root, FONT_S, COL_DIM);
     lv_obj_set_pos(s_count, 430, 14);
 
-    lv_obj_t *done = make_btn_accent(s_root, LV_SYMBOL_OK "  Done", close_cb, NULL);
+    lv_obj_t *done = make_btn_accent(s_root,
+                                     s_pick_mode ? LV_SYMBOL_CLOSE "  Cancel"
+                                                 : LV_SYMBOL_OK "  Done",
+                                     close_cb, NULL);
     lv_obj_set_size(done, 130, 34);
     lv_obj_set_pos(done, SCR_W - 130 - GRID_MX, 6);
 

@@ -126,6 +126,7 @@ static void run_parser_smoke(char *out, size_t cap)
 
 
 static void rebuild_dashboard(void);   /* defined with the dashboard below */
+static void hole_tapped(lv_event_t *e);
 
 static void reopen_setup_cb(lv_event_t *e)
 {
@@ -155,6 +156,11 @@ static void endpoints_cb(lv_event_t *e)
 static tile_inst_t *s_tiles[CFG_MAX_PANELS];
 static tile_spec_t  s_specs[CFG_MAX_PANELS];
 static int          s_tile_n;
+/* One placeholder per free cell: an empty tile is a place to put something,
+ * not an absence, and tapping where you want it beats picking from a list and
+ * finding out afterwards where it landed. */
+static lv_obj_t    *s_holes[GRID_COLS * GRID_ROWS];
+static int          s_hole_n;
 static lv_obj_t    *s_hdr_title;
 static lv_obj_t    *s_hdr_status;
 static lv_obj_t    *s_ftr_left;
@@ -190,7 +196,57 @@ static void build_tiles(lv_obj_t *scr)
         s_tile_n++;
     }
 
-    /* An empty dashboard has to say why, or it reads as a fault. */
+    /* Placeholders for every cell nothing covers. */
+    for (int i = 0; i < s_hole_n; i++) {
+        if (s_holes[i]) lv_obj_del(s_holes[i]);
+        s_holes[i] = NULL;
+    }
+    s_hole_n = 0;
+
+    bool used[GRID_ROWS][GRID_COLS];
+    memset(used, 0, sizeof(used));
+    for (int i = 0; i < c->n_panels; i++) {
+        const cfg_panel_t *p = &c->panels[i];
+        if (!p->sel[0] || p->screen != 0) continue;
+        uint8_t pw = p->w ? p->w : 1, ph = p->h ? p->h : 1;
+        for (int r = p->row; r < p->row + ph && r < GRID_ROWS; r++) {
+            for (int cc = p->col; cc < p->col + pw && cc < GRID_COLS; cc++) {
+                used[r][cc] = true;
+            }
+        }
+    }
+
+    for (int r = 0; r < GRID_ROWS; r++) {
+        for (int cc = 0; cc < GRID_COLS; cc++) {
+            if (used[r][cc]) continue;
+            lv_obj_t *o = lv_obj_create(scr);
+            lv_obj_set_size(o, TILE_W(1), TILE_H(1));
+            lv_obj_set_pos(o, TILE_X(cc), TILE_Y(r));
+            lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_color(o, COL_LINE, 0);
+            lv_obj_set_style_border_width(o, 2, 0);
+            lv_obj_set_style_border_opa(o, LV_OPA_60, 0);
+            lv_obj_set_style_radius(o, RADIUS_TILE, 0);
+            lv_obj_set_style_pad_all(o, 0, 0);
+            lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_bg_color(o, COL_PANEL, LV_STATE_PRESSED);
+            lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_STATE_PRESSED);
+
+            lv_obj_t *plus = make_label(o, FONT_XL, COL_LINE);
+            lv_label_set_text(plus, "+");
+            lv_obj_center(plus);
+            lv_obj_clear_flag(plus, LV_OBJ_FLAG_CLICKABLE);
+
+            lv_obj_add_event_cb(o, hole_tapped, LV_EVENT_CLICKED,
+                                (void *)(uintptr_t)(((uint32_t)cc << 8) | r));
+            if (s_hole_n < (int)(sizeof(s_holes) / sizeof(s_holes[0]))) {
+                s_holes[s_hole_n++] = o;
+            }
+        }
+    }
+
+    /* With outlines showing, an empty screen no longer reads as a fault, so
+     * the hint only needs to explain the gesture once. */
     hidden_if_changed(s_empty, s_tile_n > 0);
 }
 
@@ -201,6 +257,21 @@ static void browser_closed(void);
 static void tile_tapped(uint16_t panel_id)
 {
     ui_panelcfg_open(panel_id, browser_closed);
+}
+
+/* A metric was chosen for an empty cell: go straight to the widget picker, so
+ * the flow is tap the hole, tap the metric, choose how it looks. */
+static void hole_filled(uint16_t panel_id)
+{
+    if (panel_id == 0) { browser_closed(); return; }
+    ui_panelcfg_open(panel_id, browser_closed);
+}
+
+static void hole_tapped(lv_event_t *e)
+{
+    uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    ui_browser_open_pick((uint8_t)(packed >> 8), (uint8_t)(packed & 0xFF),
+                         hole_filled);
 }
 
 static void browse_cb(lv_event_t *e)
@@ -240,11 +311,9 @@ static void build_dashboard(void)
     lv_obj_set_pos(div, 0, HEADER_H - 1);
 
     s_empty = make_label(scr, FONT_L, COL_DIM);
-    lv_label_set_text(s_empty,
-                      "No metrics selected\n\n"
-                      LV_SYMBOL_LIST "  Browse metrics to choose what to show");
+    lv_label_set_text(s_empty, "Tap a  +  to choose what goes there");
     lv_obj_set_style_text_align(s_empty, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(s_empty, LV_ALIGN_BOTTOM_MID, 0, -FOOTER_H - 4);
 
     tile_set_tap_handler(tile_tapped);
     build_tiles(scr);

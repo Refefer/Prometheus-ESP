@@ -8,6 +8,20 @@
  */
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
+/* Browse-and-tick: add or remove any number of tiles, auto-placed. */
 void ui_browser_open(void (*on_close)(void));
+
+/*
+ * Pick-one: choose a single metric for a specific empty cell.
+ *
+ * Reached by tapping the empty outline where the tile should go, which is a
+ * more direct way to build a screen than picking from a list and finding out
+ * afterwards where it landed. on_pick receives the new panel's id, or 0 if
+ * the user backed out.
+ */
+void ui_browser_open_pick(uint8_t col, uint8_t row,
+                          void (*on_pick)(uint16_t panel_id));
+
 bool ui_browser_is_open(void);
