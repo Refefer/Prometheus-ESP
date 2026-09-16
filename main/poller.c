@@ -38,6 +38,7 @@ typedef struct {
     fmt_mode_t   fmt;
     char         unit[8];
     int8_t       scale;          /* pinned prefix, or FMT_PIN_AUTO */
+    bool         group;          /* thousands separators */
     panel_op_t   op;
     bool         multi;
     uint8_t      n_terms;
@@ -442,6 +443,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         poller_metric_t *m = &next.m[i];
         m->panel_id = w->panel_id;
         m->scale    = w->scale;
+        m->group    = w->group;
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;
@@ -484,7 +486,8 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 if (isfinite(cv)) {
                     fmt_state_t fs = {0};
                     char suf[12]; bool numeric;
-                    ui_fmt_value(cv, w->fmt, w->unit, &fs, w->scale,
+                    fmt_style_t csy = { w->fmt, w->unit, w->scale, w->group };
+                    ui_fmt_value(cv, &csy, &fs,
                                  m->child_num[k], sizeof(m->child_num[k]),
                                  suf, sizeof(suf), &numeric);
                 } else {
@@ -586,7 +589,8 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
         if (isfinite(shown)) {
             bool numeric = true;
-            ui_fmt_value(shown, w->fmt, w->unit, &w->fmt_state, w->scale,
+            fmt_style_t vsy = { w->fmt, w->unit, w->scale, w->group };
+            ui_fmt_value(shown, &vsy, &w->fmt_state,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
             m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
@@ -994,6 +998,7 @@ static void reload_watches(void)
         w->multi    = p->multi;
         w->fmt      = p->fmt;
         w->scale    = p->scale;
+        w->group    = p->group;
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
 
         bool bad = false;

@@ -17,22 +17,30 @@ static int g_ran, g_fail;
         }                                                                    \
     } while (0)
 
-static const char *J(double v, fmt_mode_t m, const char *u, int8_t pin)
+static const char *J(double v, fmt_mode_t m, const char *u, int8_t pin,
+                     bool group)
 {
-    static char buf[64];
-    ui_fmt_join(v, m, u, pin, buf, sizeof(buf));
+    static char buf[80];
+    fmt_style_t sy = { m, u, pin, group };
+    ui_fmt_join(v, &sy, buf, sizeof(buf));
     return buf;
 }
 #define EQ(v, m, u, want) \
-    CHECK(strcmp(J(v, m, u, FMT_PIN_AUTO), want) == 0, \
+    CHECK(strcmp(J(v, m, u, FMT_PIN_AUTO, false), want) == 0, \
           "%g -> \"%s\", want \"%s\"", \
-          (double)(v), J(v, m, u, FMT_PIN_AUTO), want)
+          (double)(v), J(v, m, u, FMT_PIN_AUTO, false), want)
 
 /* Same, with the prefix pinned. */
 #define EQP(v, m, u, pin, want) \
-    CHECK(strcmp(J(v, m, u, pin), want) == 0, \
+    CHECK(strcmp(J(v, m, u, pin, false), want) == 0, \
           "%g pinned %d -> \"%s\", want \"%s\"", \
-          (double)(v), (int)(pin), J(v, m, u, pin), want)
+          (double)(v), (int)(pin), J(v, m, u, pin, false), want)
+
+/* Same, with thousands separators on. */
+#define EQG(v, m, u, pin, want) \
+    CHECK(strcmp(J(v, m, u, pin, true), want) == 0, \
+          "%g grouped -> \"%s\", want \"%s\"", \
+          (double)(v), J(v, m, u, pin, true), want)
 
 static void test_sigfigs(void)
 {
@@ -76,23 +84,28 @@ static void test_hysteresis(void)
     char num[32], suf[16];
     bool numeric;
 
-    ui_fmt_value(990.0, FMT_SI, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(990.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "") == 0, "990 starts unprefixed (suf=\"%s\")", suf);
 
     /* Just over 1000 must NOT promote yet -- the threshold is 1000*1.05. */
-    ui_fmt_value(1010.0, FMT_SI, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(1010.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "") == 0, "1010 stays unprefixed (suf=\"%s\" num=\"%s\")", suf, num);
 
     /* Comfortably past the threshold: promote. */
-    ui_fmt_value(1200.0, FMT_SI, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(1200.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "k") == 0, "1200 promotes to k (suf=\"%s\")", suf);
 
     /* Dropping just under 1000 must NOT demote immediately. */
-    ui_fmt_value(980.0, FMT_SI, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(980.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "k") == 0, "980 holds at k (suf=\"%s\")", suf);
 
     /* Well under: demote. */
-    ui_fmt_value(500.0, FMT_SI, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(500.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "") == 0, "500 demotes (suf=\"%s\")", suf);
 
     /* Now the real scenario: oscillate around the boundary and count changes.
@@ -102,8 +115,8 @@ static void test_hysteresis(void)
     int changes = 0;
     const double wobble[] = { 995, 1005, 998, 1002, 999, 1001, 997, 1003 };
     for (size_t i = 0; i < sizeof(wobble)/sizeof(wobble[0]); i++) {
-        ui_fmt_value(wobble[i], FMT_SI, "", &st2, FMT_PIN_AUTO, num, sizeof(num),
-                     suf, sizeof(suf), &numeric);
+        { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(wobble[i], &sy, &st2, num, sizeof(num), suf, sizeof(suf), &numeric); }
         char joined[48];
         snprintf(joined, sizeof(joined), "%s%s", num, suf);
         if (i > 0 && strcmp(joined, prev) != 0) changes++;
@@ -117,9 +130,11 @@ static void test_hysteresis(void)
     /* A zero sample must not reset the scale: a series that idles at 0 should
      * not jump scale the moment it wakes up. */
     fmt_state_t st3 = {0};
-    ui_fmt_value(5e6, FMT_SI, "", &st3, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(5e6, &sy, &st3, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "M") == 0, "5e6 -> M");
-    ui_fmt_value(0.0, FMT_SI, "", &st3, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(0.0, &sy, &st3, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(suf, "M") == 0, "zero holds the prefix (suf=\"%s\")", suf);
 }
 
@@ -134,30 +149,36 @@ static void test_integral_series(void)
     char num[32], suf[16]; bool numeric;
 
     fmt_state_t st = {0};
-    ui_fmt_value(3.0, FMT_RAW, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(3.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "3") == 0, "3 -> \"%s\", want \"3\"", num);
-    ui_fmt_value(0.0, FMT_RAW, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(0.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "0") == 0, "0 -> \"%s\", want \"0\"", num);
-    ui_fmt_value(12.0, FMT_RAW, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(12.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "12") == 0, "12 -> \"%s\"", num);
 
     /* One fractional sample switches the series to decimals permanently, so a
      * measurement that merely lands on a round number is not mistaken for a
      * count. */
-    ui_fmt_value(0.84, FMT_RAW, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(0.84, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "0.840") == 0, "0.84 -> \"%s\"", num);
-    ui_fmt_value(1.0, FMT_RAW, "", &st, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(1.0, &sy, &st, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "1.00") == 0, "after a fraction, 1.0 keeps decimals -> \"%s\"", num);
 
     /* Without state there is nothing to track, so the sig-fig rule stands. */
-    ui_fmt_value(3.0, FMT_RAW, "", NULL, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_RAW, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(3.0, &sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "3.00") == 0, "stateless keeps sig-figs -> \"%s\"", num);
 
     /* Scaling still applies: an integral byte count is not forced to 0 dp
      * once it has a prefix. */
     fmt_state_t st2 = {0};
-    ui_fmt_value(11.4 * 1073741824.0, FMT_IEC, "", &st2, FMT_PIN_AUTO,
-                 num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_IEC, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(11.4 * 1073741824.0, &sy, &st2, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "11.4") == 0, "scaled IEC keeps decimals -> \"%s\"", num);
 }
 
@@ -211,11 +232,13 @@ static void test_nonfinite(void)
     bool numeric;
     /* A NaN gauge is an ABSENT reading. Rendering it as 0 would look exactly
      * like a real zero, which is the worst possible outcome on a panel. */
-    ui_fmt_value(NAN, FMT_SI, "", NULL, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(NAN, &sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "--") == 0, "NaN -> \"%s\"", num);
     CHECK(strcmp(num, "0") != 0, "NaN never renders as zero");
 
-    ui_fmt_value(INFINITY, FMT_SI, "", NULL, FMT_PIN_AUTO, num, sizeof(num), suf, sizeof(suf), &numeric);
+    { fmt_style_t sy = { FMT_SI, "", FMT_PIN_AUTO, false };
+      ui_fmt_value(INFINITY, &sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "+Inf") == 0, "+Inf -> \"%s\"", num);
     CHECK(numeric == false, "+Inf needs a text face");
 }
@@ -274,6 +297,36 @@ static void test_pinned_prefix(void)
     CHECK(ui_fmt_prefix_name(FMT_DURATION, 1) == NULL, "durations have no ladder");
 }
 
+static void test_grouping(void)
+{
+    printf("thousands separators\n");
+
+    /* The case asked for: a pinned plain-unit count, read across a room. */
+    EQG(17321.0, FMT_RAW, "", FMT_PIN_AUTO, "17,321");
+    EQG(17321.0, FMT_SI,  "", 0,            "17,321");
+
+    /* Boundaries either side of the first separator. */
+    EQG(999.0,    FMT_RAW, "", FMT_PIN_AUTO, "999");
+    EQG(1000.0,   FMT_RAW, "", FMT_PIN_AUTO, "1,000");
+    EQG(999999.0, FMT_RAW, "", FMT_PIN_AUTO, "999,999");
+    EQG(1000000.0, FMT_RAW, "", FMT_PIN_AUTO, "1,000,000");
+
+    /* The sign and the fraction are not digits to be grouped. */
+    EQG(-1234567.0, FMT_RAW, "", FMT_PIN_AUTO, "-1,234,567");
+    EQG(12345.6,    FMT_SI,  "", 0,            "12,346");
+
+    /* Grouping never fires when the prefix already shortened the number,
+     * which is why it only matters alongside a pin. */
+    EQG(1234567.0, FMT_SI, "", FMT_PIN_AUTO, "1.23 M");
+
+    /* Modes that do not produce bare digits are left alone. */
+    EQG(90.0,  FMT_DURATION, "", FMT_PIN_AUTO, "1m 30s");
+    EQG(1.0,   FMT_BOOL,     "", FMT_PIN_AUTO, "UP");
+
+    /* And off is still off. */
+    EQ(17321.0, FMT_RAW, "", "17321");
+}
+
 static void test_charset_invariant(void)
 {
     printf("digits-only font charset invariant\n");
@@ -294,7 +347,10 @@ static void test_charset_invariant(void)
             /* Pinned as well as auto: a pin changes which branch formats the
              * number, so the digits-only guarantee has to hold on both. */
             int8_t pin = (i % 3 == 0) ? FMT_PIN_AUTO : (int8_t)(i % 4);
-            ui_fmt_value(vals[i], modes[m], "", NULL, pin, num, sizeof(num),
+            /* Grouping on for half the sweep: the comma has to be in the
+             * digits-only charset too, and it is easy to forget that. */
+            fmt_style_t sy = { modes[m], "", pin, (i % 2) == 0 };
+            ui_fmt_value(vals[i], &sy, NULL, num, sizeof(num),
                          suf, sizeof(suf), &numeric);
             if (!numeric) continue;
             for (const char *p = num; *p; p++) {
@@ -352,6 +408,7 @@ int main(void)
     test_nonfinite();
     test_rate_hour();
     test_pinned_prefix();
+    test_grouping();
     test_charset_invariant();
     test_infer();
     printf("\n%d checks, %d failures\n", g_ran, g_fail);

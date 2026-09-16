@@ -65,6 +65,7 @@ typedef struct {
     /* The panel's pinned prefix, carried so a chart's axis and a histogram's
      * quantiles cannot disagree with the number above them. */
     int8_t  scale;
+    bool    group;
 
     /* Multi-series extras: one row per matching series, ranked by value. */
     uint8_t n_children;

@@ -21,6 +21,39 @@
 
 /* --------------------------------------------------------------- helpers */
 
+/*
+ * The largest face whose text actually fits the space it is given.
+ *
+ * The span alone is not enough to choose by. Pinning a prefix and turning on
+ * thousands separators can turn a three-character reading into thirteen
+ * ("2,836,857,472"), and a face chosen from the span alone then ellipses a
+ * number into nonsense. Stepping down one rung is far better than that, and
+ * the reader loses stroke weight rather than digits.
+ */
+static const lv_font_t *fit_font(const lv_font_t *start, const char *txt,
+                                 bool numeric_only, lv_coord_t avail)
+{
+    static const lv_font_t *const num_ladder[] = {
+        FONT_NUM_XL, FONT_NUM_L, FONT_NUM_M, FONT_NUM_S,
+    };
+    static const lv_font_t *const txt_ladder[] = { FONT_XL, FONT_L, FONT_M };
+
+    const lv_font_t *const *lad = numeric_only ? num_ladder : txt_ladder;
+    int n = numeric_only ? 4 : 3;
+    if (txt == NULL || txt[0] == '\0' || avail <= 0) return start;
+
+    int i = 0;
+    while (i < n && lad[i] != start) i++;
+    if (i == n) i = 0;                       /* not on the ladder: start high */
+
+    for (; i < n; i++) {
+        lv_coord_t w = lv_txt_get_width(txt, (uint32_t)strlen(txt), lad[i], 0,
+                                        LV_TEXT_FLAG_NONE);
+        if (w <= avail) return lad[i];
+    }
+    return lad[n - 1];                       /* smallest we have; let it clip */
+}
+
 static const lv_font_t *num_font(const tile_inst_t *t, bool numeric_only)
 {
     /* Durations ("3d 4h") and booleans ("UP") carry letters, which the
@@ -71,6 +104,7 @@ typedef struct {
      * callback that has no access to the refresh data. An axis reading "k"
      * above a value reading plain units would be worse than no axis. */
     int8_t           scale;
+    bool             group;
 } chart_priv_t;
 
 /* Refill the chart from the tile's history, rescaling if needed. */
@@ -180,7 +214,10 @@ static void stat_build(tile_inst_t *t, lv_obj_t *body)
 static void stat_update(tile_inst_t *t, const tile_data_t *d)
 {
     stat_priv_t *p = t->priv;
-    const lv_font_t *f = num_font(t, d->numeric_only);
+    const char *txt = d->valid ? d->num : "--";
+    const lv_font_t *f = fit_font(num_font(t, d->numeric_only), txt,
+                                  d->numeric_only,
+                                  TILE_W(t->spec->w) - 2 * PAD_S);
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
@@ -242,7 +279,13 @@ static void spark_build(tile_inst_t *t, lv_obj_t *body)
 static void spark_update(tile_inst_t *t, const tile_data_t *d)
 {
     chart_priv_t *p = t->priv;
-    const lv_font_t *f = num_font(t, d->numeric_only);
+    const char *txt = d->valid ? d->num : "--";
+    /* At 2x1 and wider the sparkline takes half the body, so the value only
+     * gets the other half. */
+    lv_coord_t body_w = TILE_W(t->spec->w) - 2 * PAD_S;
+    lv_coord_t avail  = t->spec->w >= 2 ? body_w / 2 - 8 : body_w;
+    const lv_font_t *f = fit_font(num_font(t, d->numeric_only), txt,
+                                  d->numeric_only, avail);
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
@@ -284,7 +327,8 @@ static void chart_tick_cb(lv_event_t *e)
     if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
         float frac = (float)dsc->value / (float)CHART_SPAN;
         float v = p->lo + frac * (p->hi - p->lo);
-        ui_fmt_axis(v, FMT_SI, "", p->scale, dsc->text, (size_t)dsc->text_length);
+        fmt_style_t sy = { FMT_SI, "", p->scale, p->group };
+        ui_fmt_axis(v, &sy, dsc->text, (size_t)dsc->text_length);
     } else {
         dsc->text[0] = '\0';      /* x ticks are handled by the caption */
     }
@@ -336,7 +380,11 @@ static void chartt_update(tile_inst_t *t, const tile_data_t *d)
 {
     chart_priv_t *p = t->priv;
     p->scale = d->scale;
-    const lv_font_t *f = d->numeric_only ? FONT_NUM_L : FONT_XL;
+    p->group = d->group;
+    const char *txt = d->valid ? d->num : "--";
+    const lv_font_t *f = fit_font(d->numeric_only ? FONT_NUM_L : FONT_XL, txt,
+                                  d->numeric_only,
+                                  TILE_W(t->spec->w) - 2 * PAD_S);
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
@@ -426,8 +474,9 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     }
 
     char a[24], b[24];
-    ui_fmt_join(lo, FMT_SI, "", d->scale, a, sizeof(a));
-    ui_fmt_join(hi, FMT_SI, "", d->scale, b, sizeof(b));
+    fmt_style_t rsy = { FMT_SI, "", d->scale, d->group };
+    ui_fmt_join(lo, &rsy, a, sizeof(a));
+    ui_fmt_join(hi, &rsy, b, sizeof(b));
     label_set_fmt_if_changed(p->range, "%s  -  %s", a, b);
 }
 
@@ -645,7 +694,8 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
     lv_chart_refresh(p->chart);
 
     char buf[32];
-    ui_fmt_join(0.0, d->fmt, d->unit ? d->unit : "", d->scale, buf, sizeof(buf));
+    fmt_style_t hsy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group };
+    ui_fmt_join(0.0, &hsy, buf, sizeof(buf));
     label_set_if_changed(p->lo_lbl, buf);
 
     /* The last bound is +Inf by construction, so label the highest finite
@@ -654,14 +704,13 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
     for (int i = 0; i < d->n_buckets; i++) {
         if (isfinite(d->bucket_le[i])) hi = d->bucket_le[i];
     }
-    ui_fmt_join(hi, d->fmt, d->unit ? d->unit : "", d->scale, buf, sizeof(buf));
+    ui_fmt_join(hi, &hsy, buf, sizeof(buf));
     label_set_if_changed(p->hi_lbl, buf);
 
     const float q[3] = { d->p50, d->p90, d->p99 };
     for (int i = 0; i < 3; i++) {
         if (isfinite(q[i])) {
-            ui_fmt_join(q[i], d->fmt, d->unit ? d->unit : "", d->scale,
-                        buf, sizeof(buf));
+            ui_fmt_join(q[i], &hsy, buf, sizeof(buf));
             label_set_if_changed(p->q_val[i], buf);
             text_color_if_changed(p->q_val[i], COL_TEXT);
         } else {

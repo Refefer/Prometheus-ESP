@@ -215,7 +215,7 @@ static const char *const k_keys_endpoint[] = {
 };
 static const char *const k_keys_screen[] = { "title", "pinned", NULL };
 static const char *const k_keys_panel[] = {
-    "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "terms",
+    "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "group", "terms",
     "vmin", "vmax", "warn", "crit", "multi", "lower_is_worse",
     "screen", "col", "row", "w", "h",
     /* schema 1 spelled a panel's single term inline; still accepted */
@@ -311,6 +311,7 @@ static void write_presentation(FILE *f)
         fputs(", \"crit\": ", f); write_float(f, p->crit);
         fprintf(f, ", \"multi\": %s", p->multi ? "true" : "false");
         fputs(", \"scale\": ", f); write_escaped(f, enum_to_name(k_scales, p->scale));
+        fprintf(f, ", \"group\": %s", p->group ? "true" : "false");
         fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
                    " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
                 p->lower_is_worse ? "true" : "false",
@@ -653,6 +654,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             p->crit = get_float(it, "crit");
             p->multi          = get_bool(it, "multi", false);
             p->scale = (int8_t)name_to_enum_ck(it, "scale", k_scales, FMT_PIN_AUTO, pe, where);
+            p->group = get_bool(it, "group", false);
             p->lower_is_worse = get_bool(it, "lower_is_worse", false);
             p->screen = (uint8_t)get_int(it, "screen", 0);
             p->col = (uint8_t)get_int(it, "col", 0);

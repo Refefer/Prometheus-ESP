@@ -45,6 +45,7 @@ static const struct { uint8_t w, h; const char *name; } k_sizes[4] = {
  */
 static const int8_t k_scales_ui[5] = { FMT_PIN_AUTO, 0, 1, 2, 3 };
 static lv_obj_t *s_scale_cap, *s_scale_btn[5];
+static lv_obj_t *s_group_cap, *s_group_btn;
 
 /* Quantiles worth a button. p50/p90/p99 is the usual trio; anything finer
  * needs more observations than a 5s scrape of a quiet service provides. */
@@ -141,6 +142,15 @@ static void refresh(void)
         bool on = (p->scale == k_scales_ui[i]);
         bg_color_if_changed(s_scale_btn[i], on ? COL_ACCENT : COL_PANEL);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
+    }
+
+    bool groupable = (probe != NULL);
+    hidden_if_changed(s_group_cap, !groupable);
+    hidden_if_changed(s_group_btn, !groupable);
+    if (groupable) {
+        bg_color_if_changed(s_group_btn, p->group ? COL_ACCENT : COL_PANEL);
+        lv_obj_t *gl = lv_obj_get_child(s_group_btn, 0);
+        if (gl) text_color_if_changed(gl, p->group ? COL_BG : COL_TEXT);
     }
 
     for (int i = 0; i < 4; i++) {
@@ -419,6 +429,16 @@ static void screen_cb(lv_event_t *e)
     refresh();
 }
 
+static void group_cb(lv_event_t *e)
+{
+    (void)e;
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    p->group = !p->group;
+    config_touch();
+    refresh();
+}
+
 static void scale_cb(lv_event_t *e)
 {
     cfg_panel_t *p = panel();
@@ -657,6 +677,16 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
         lv_obj_set_size(s_scale_btn[i], 60, 38);
         lv_obj_set_pos(s_scale_btn[i], GRID_MX + i * 64, 356);
     }
+
+    /* Thousands separators. Sits beside Units because both shape the number
+     * without changing it, and the comma is in the digits-only face. */
+    s_group_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_group_cap, "Thousands");
+    lv_obj_set_pos(s_group_cap, GRID_MX + 490, 336);
+
+    s_group_btn = make_btn(s_root, "1,000", group_cb, NULL);
+    lv_obj_set_size(s_group_btn, 110, 38);
+    lv_obj_set_pos(s_group_btn, GRID_MX + 490, 356);
 
     /* Which screen the tile lives on. Without this a tile placed on a second
      * screen could only be deleted, never brought back. */

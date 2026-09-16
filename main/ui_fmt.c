@@ -167,11 +167,48 @@ void ui_fmt_duration(double seconds, char *out, size_t cap)
     }
 }
 
-void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
-                  fmt_state_t *st, int8_t pin,
-                  char *num, size_t num_cap,
-                  char *suffix, size_t suffix_cap,
-                  bool *numeric_only)
+/*
+ * Thousands separators, inserted into an already-formatted number.
+ *
+ * Done on the text rather than during printf because the fractional part and
+ * the sign must be left alone -- "-12345.678" groups to "-12,345.678", not
+ * "-12,345.678,000" -- and because every mode below produces its digits a
+ * different way. The comma is in the digits-only font's charset (see
+ * tools/gen_fonts.sh), so a grouped number still renders in the large faces.
+ *
+ * Silently does nothing if the result would not fit, which leaves a correct
+ * ungrouped number rather than a truncated grouped one.
+ */
+static void group_thousands(char *s, size_t cap)
+{
+    if (s == NULL) return;
+
+    size_t start = (s[0] == '-' || s[0] == '+') ? 1 : 0;
+    size_t i = start;
+    while (s[i] >= '0' && s[i] <= '9') i++;
+    size_t int_digits = i - start;
+    if (int_digits < 4) return;                  /* nothing to separate */
+
+    size_t commas = (int_digits - 1) / 3;
+    size_t len = strlen(s);
+    if (len + commas + 1 > cap) return;
+
+    /* Walk backwards from the end, copying and inserting every third digit. */
+    size_t src = len, dst = len + commas;
+    s[dst] = '\0';
+    while (src > i) { s[--dst] = s[--src]; }      /* the fractional tail */
+    size_t run = 0;
+    while (src > start) {
+        s[--dst] = s[--src];
+        if (++run % 3 == 0 && src > start) s[--dst] = ',';
+    }
+}
+
+static void fmt_value_core(double v, fmt_mode_t mode, const char *base_unit,
+                           fmt_state_t *st, int8_t pin,
+                           char *num, size_t num_cap,
+                           char *suffix, size_t suffix_cap,
+                           bool *numeric_only)
 {
     if (num && num_cap)       num[0] = '\0';
     if (suffix && suffix_cap) suffix[0] = '\0';
@@ -256,21 +293,41 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     }
 }
 
-void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
-                 char *out, size_t cap)
+/*
+ * Formats, then groups. Grouping is applied to the finished digits and only
+ * when they are digits: a duration reads "12m 30s" and a bool reads "UP",
+ * and numeric_only is exactly the flag that distinguishes those.
+ */
+void ui_fmt_value(double v, const fmt_style_t *sy, fmt_state_t *st,
+                  char *num, size_t num_cap,
+                  char *suffix, size_t suffix_cap,
+                  bool *numeric_only)
 {
-    char num[48], suf[24];
+    static const fmt_style_t k_plain = { FMT_RAW, "", FMT_PIN_AUTO, false };
+    if (sy == NULL) sy = &k_plain;
+
+    bool numeric = false;
+    fmt_value_core(v, sy->mode, sy->unit, st, sy->pin,
+                   num, num_cap, suffix, suffix_cap, &numeric);
+    if (sy->group && numeric) group_thousands(num, num_cap);
+    if (numeric_only) *numeric_only = numeric;
+}
+
+void ui_fmt_join(double v, const fmt_style_t *sy, char *out, size_t cap)
+{
+    char num[64], suf[24];
     bool numeric;
-    ui_fmt_value(v, mode, base_unit, NULL, pin, num, sizeof(num),
-                 suf, sizeof(suf), &numeric);
+    ui_fmt_value(v, sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric);
     if (suf[0]) snprintf(out, cap, "%s %s", num, suf);
     else        safe_copy(out, cap, num);
 }
 
-void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
-                 char *out, size_t cap)
+void ui_fmt_axis(double v, const fmt_style_t *sy, char *out, size_t cap)
 {
     if (out == NULL || cap == 0) return;
+    static const fmt_style_t k_plain = { FMT_RAW, "", FMT_PIN_AUTO, false };
+    if (sy == NULL) sy = &k_plain;
+    const fmt_mode_t mode = sy->mode;
     out[0] = '\0';
     if (!isfinite(v)) { safe_copy(out, cap, ""); return; }
 
@@ -287,10 +344,9 @@ void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
         snprintf(out, cap, "%.0f%%", v);
         return;
     default: {
-        char num[32], suf[24];
+        char num[48], suf[24];
         bool numeric;
-        ui_fmt_value(v, mode, base_unit, NULL, pin, num, sizeof(num),
-                     suf, sizeof(suf), &numeric);
+        ui_fmt_value(v, sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric);
         /* Drop a trailing ".00"/".0" so ticks line up in width. */
         char *dot = strchr(num, '.');
         if (dot) {

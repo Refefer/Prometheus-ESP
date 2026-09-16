@@ -665,6 +665,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"panel.vmin/vmax\":\"gauge and bar range, in the SOURCE domain rather than the displayed one -- a percent panel is fed a 0..1 ratio, so its full scale is 1, not 100. null takes that default from the format.\",\n"
 "    \"panel.warn/crit\":\"threshold colouring; null means none\",\n"
 "    \"panel.multi\":    \"show every matching series as ranked rows instead of one number\",\n"
+"    \"panel.group\":    \"thousands separators in the value: 17,321 rather than 17321. Only affects formats that render bare digits, and only bites once a number is four digits long -- which in practice means alongside a scale pin, since an auto prefix keeps it to three.\",\n"
 "    \"panel.scale\":    \"pins the SI/IEC prefix so the unit stops moving as the value does; auto keeps three significant digits instead. The names are the SI ladder and map by position on a byte panel: k is KiB, M is MiB. Ignored by formats with no ladder (percent, duration, bool).\",\n"
 "    \"term.sel\":       \"metric{label=\\\"value\\\"}; a label value may contain * as a glob\",\n"
 "    \"term.reduce\":    \"collapses the matched set to a scalar; this is the sum by() of this format\",\n"

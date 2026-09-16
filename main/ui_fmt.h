@@ -103,20 +103,38 @@ typedef struct {
  * `st` may be NULL, which disables hysteresis (correct for one-shot
  * formatting like axis labels, wrong for a live tile).
  */
-void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
-                  fmt_state_t *st, int8_t pin,
+/*
+ * How a panel wants its numbers written -- everything that shapes the text
+ * without changing the quantity.
+ *
+ * A struct rather than four more parameters. The pin and the grouping flag
+ * are both small scalars that would sit adjacent in the argument list, where
+ * transposing them compiles cleanly and is invisible at the call site; and
+ * every tile that renders a value also renders an axis or a quantile beside
+ * it, which have to agree. Passing one thing makes disagreement hard.
+ */
+typedef struct {
+    fmt_mode_t  mode;
+    const char *unit;    /* base unit appended after the prefix, e.g. "tok" */
+    int8_t      pin;     /* FMT_PIN_AUTO, or a fixed ladder exponent */
+    bool        group;   /* thousands separators: 17,321 rather than 17321 */
+} fmt_style_t;
+
+/* The plain default: auto prefix, no grouping, no unit. */
+#define FMT_STYLE(m) ((fmt_style_t){ .mode = (m), .unit = "", \
+                                     .pin = FMT_PIN_AUTO, .group = false })
+
+void ui_fmt_value(double v, const fmt_style_t *sy, fmt_state_t *st,
                   char *num, size_t num_cap,
                   char *suffix, size_t suffix_cap,
                   bool *numeric_only);
 
 /* Convenience: num and suffix joined with a space, for logs and lists. */
-void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
-                 char *out, size_t cap);
+void ui_fmt_join(double v, const fmt_style_t *sy, char *out, size_t cap);
 
 /* Compact form for chart axis ticks: no hysteresis, 3 chars where possible.
- * Takes the pin so an axis cannot disagree with the value above it. */
-void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
-                 char *out, size_t cap);
+ * Takes the whole style, so an axis cannot disagree with the value above it. */
+void ui_fmt_axis(double v, const fmt_style_t *sy, char *out, size_t cap);
 
 /*
  * The prefix a pin would produce, for labelling a chooser: "1", "k", "M" on

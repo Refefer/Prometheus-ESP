@@ -126,6 +126,9 @@ typedef struct {
      * part of a panel's data fingerprint.
      */
     int8_t      scale;
+    /* Thousands separators. Presentation only, like scale -- it changes how
+     * the number is written, never what it is. */
+    bool        group;
     uint8_t     screen;              /* index into screens[] */
     uint8_t     col, row, w, h;
     /* A multi-series panel matches every series of its metric rather than one,

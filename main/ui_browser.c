@@ -633,13 +633,14 @@ static void render_rows(void)
             /* The preview shows the RAW sample, so a counter reads as its
              * total here even though its tile will show a rate. Formatting it
              * as a rate would be a lie: there is only one sample. */
-            ui_fmt_join(value, (fmt == FMT_RATE_SI)  ? FMT_SI
-                             : (fmt == FMT_RATE_IEC) ? FMT_IEC
-                             : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
-                             : fmt,
-                        /* Nothing is pinned yet: this is a preview of a
-                         * metric that is not a panel. */
-                        unit, FMT_PIN_AUTO, buf, sizeof(buf));
+            /* Nothing is styled yet: this is a preview of a metric that is
+             * not a panel. */
+            fmt_style_t psy = { (fmt == FMT_RATE_SI)  ? FMT_SI
+                              : (fmt == FMT_RATE_IEC) ? FMT_IEC
+                              : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
+                              : fmt,
+                                unit, FMT_PIN_AUTO, false };
+            ui_fmt_join(value, &psy, buf, sizeof(buf));
             label_set_if_changed(s_row_val[r], buf);
         } else {
             label_set_if_changed(s_row_val[r], "");

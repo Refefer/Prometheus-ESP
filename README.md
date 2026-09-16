@@ -100,6 +100,16 @@ settings, labelled from whichever ladder that tile's format uses.
 A pin applies to the axis and the quantiles as well as the value, so nothing
 on a tile can disagree with the number above it.
 
+`panel.group` turns on thousands separators -- `17,321` rather than `17321`.
+It only bites once a number is four digits long, which in practice means
+alongside a pin, since an auto prefix keeps it to three. The comma is in the
+digits-only font's charset, so a grouped number still renders in the large
+faces.
+
+Both options make a reading longer, so the numeric face is chosen from the
+text rather than from the tile's span: a 2x1 tile showing `2,842,612,288`
+steps down one rung instead of ellipsing the number into nonsense.
+
 ### Windows
 
 `term.window_s` is the span a rate or quantile covers, and it means what it

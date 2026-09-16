@@ -63,6 +63,7 @@ typedef struct {
     fmt_mode_t   fmt;         /* how to render the quantiles */
     const char  *unit;
     int8_t       scale;       /* pinned prefix, or FMT_PIN_AUTO */
+    bool         group;       /* thousands separators */
 
     /* Multi-series extras. */
     uint8_t        n_children;

@@ -704,6 +704,7 @@ static void dashboard_tick(lv_timer_t *timer)
                 .fmt          = (fmt_mode_t)m->fmt,
                 .unit         = m->unit,
                 .scale        = m->scale,
+                .group        = m->group,
                 .n_children   = m->n_children,
                 .n_matched    = m->n_matched,
                 .child_label  = m->child_label,
