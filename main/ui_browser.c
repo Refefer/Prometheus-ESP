@@ -639,7 +639,7 @@ static void render_rows(void)
                               : (fmt == FMT_RATE_IEC) ? FMT_IEC
                               : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
                               : fmt,
-                                unit, FMT_PIN_AUTO, false };
+                                unit, FMT_PIN_AUTO, false, NULL, NULL };
             ui_fmt_join(value, &psy, buf, sizeof(buf));
             label_set_if_changed(s_row_val[r], buf);
         } else {

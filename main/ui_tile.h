@@ -66,6 +66,7 @@ typedef struct {
     int8_t       scale;       /* pinned prefix, or FMT_PIN_AUTO */
     bool         group;       /* thousands separators */
     float        peak;        /* largest seen; the auto full scale */
+    bool         seen_fraction;  /* has this series ever been fractional? */
 
     /* Multi-series extras. */
     uint8_t        n_children;

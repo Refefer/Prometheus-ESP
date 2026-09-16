@@ -67,6 +67,9 @@ typedef struct {
     int8_t  scale;
     bool    group;
     float   peak;     /* largest value seen; the auto full-scale for a gauge */
+    /* True once a fractional reading has been seen. Carried so a caption
+     * formats to the same precision as the value above it. */
+    bool    seen_fraction;
 
     /* Multi-series extras: one row per matching series, ranked by value. */
     uint8_t n_children;

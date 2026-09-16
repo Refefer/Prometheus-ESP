@@ -187,6 +187,20 @@ static void test_integral_series(void)
       ui_fmt_value(3.0, &sy, NULL, num, sizeof(num), suf, sizeof(suf), &numeric); }
     CHECK(strcmp(num, "3.00") == 0, "stateless keeps sig-figs -> \"%s\"", num);
 
+    /*
+     * A caption formatted from NO state falls back to three significant
+     * digits, which is how a gauge whose readings were only ever whole
+     * numbers came to say "6 of 6.00" -- the value carried a state and the
+     * caption beside it did not.
+     */
+    fmt_style_t si = { FMT_SI, "", FMT_PIN_AUTO, false, NULL, NULL };
+    ui_fmt_value(6.0, &si, NULL, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "6.00") == 0, "stateless caption -> \"%s\"", num);
+
+    fmt_state_t whole = { 0 };
+    ui_fmt_value(6.0, &si, &whole, num, sizeof(num), suf, sizeof(suf), &numeric);
+    CHECK(strcmp(num, "6") == 0, "seeded caption -> \"%s\"", num);
+
     /* Scaling still applies: an integral byte count is not forced to 0 dp
      * once it has a prefix. */
     fmt_state_t st2 = {0};

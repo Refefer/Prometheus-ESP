@@ -462,6 +462,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         m->scale    = w->scale;
         m->group    = w->group;
         m->peak     = (float)w->peak;
+        m->seen_fraction = w->fmt_state.seen_fraction;
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;

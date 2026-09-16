@@ -327,7 +327,7 @@ static void chart_tick_cb(lv_event_t *e)
     if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
         float frac = (float)dsc->value / (float)CHART_SPAN;
         float v = p->lo + frac * (p->hi - p->lo);
-        fmt_style_t sy = { FMT_SI, "", p->scale, p->group };
+        fmt_style_t sy = { FMT_SI, "", p->scale, p->group, NULL, NULL };
         ui_fmt_axis(v, &sy, dsc->text, (size_t)dsc->text_length);
     } else {
         dsc->text[0] = '\0';      /* x ticks are handled by the caption */
@@ -493,9 +493,16 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     }
 
     char a[24], b[24];
-    fmt_style_t rsy = { FMT_SI, "", d->scale, d->group };
-    ui_fmt_join(lo, &rsy, a, sizeof(a));
-    ui_fmt_join(hi, &rsy, b, sizeof(b));
+    fmt_style_t rsy = { FMT_SI, "", d->scale, d->group, NULL, NULL };
+    /* Same reasoning as the gauge's caption: a range describing whole numbers
+     * should be written in whole numbers. */
+    fmt_state_t rs = { 0 };
+    rs.seen_fraction = d->seen_fraction;
+    bool rn;
+    char ra[16], rb[16];
+    ui_fmt_value(lo, &rsy, &rs, a, sizeof(a), ra, sizeof(ra), &rn);
+    rs.exp = 0; rs.valid = false;
+    ui_fmt_value(hi, &rsy, &rs, b, sizeof(b), rb, sizeof(rb), &rn);
     label_set_fmt_if_changed(p->range, "%s  -  %s", a, b);
 }
 
@@ -559,10 +566,22 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
      */
     if (d->valid && isnan(t->spec->vmax) &&
         d->fmt != FMT_PCT_01 && d->fmt != FMT_PCT_100 && d->peak > 0.0f) {
-        char pk[32], line[48];
+        char pk[56], line[72];
         fmt_style_t psy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group,
                             NULL, NULL };
-        ui_fmt_join(d->peak, &psy, pk, sizeof(pk));
+        /*
+         * Seeded with the series' integrality, not left blank: a caption
+         * formatted from nothing falls back to three significant digits, so a
+         * queue depth that has only ever been whole numbers read "6 of 6.00".
+         * Fresh otherwise -- the value's prefix hysteresis is about the value,
+         * and letting the peak steer it would drag the reading's scale around.
+         */
+        fmt_state_t ps = { 0 };
+        ps.seen_fraction = d->seen_fraction;
+        char num[32], suf[16]; bool numeric;
+        ui_fmt_value(d->peak, &psy, &ps, num, sizeof(num),
+                     suf, sizeof(suf), &numeric);
+        snprintf(pk, sizeof(pk), "%s%s%s", num, suf[0] ? " " : "", suf);
         snprintf(line, sizeof(line), "of %s", pk);
         label_set_if_changed(p->suf, line);
     } else {
@@ -734,7 +753,8 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
     lv_chart_refresh(p->chart);
 
     char buf[32];
-    fmt_style_t hsy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group };
+    fmt_style_t hsy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group,
+                        NULL, NULL };
     ui_fmt_join(0.0, &hsy, buf, sizeof(buf));
     label_set_if_changed(p->lo_lbl, buf);
 
