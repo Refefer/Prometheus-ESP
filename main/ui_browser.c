@@ -875,7 +875,8 @@ static void browser_build(const char *heading)
     lv_obj_t *rescan = make_btn(s_root, LV_SYMBOL_REFRESH "  Rescan",
                                 rescan_cb, NULL);
     lv_obj_set_size(rescan, 150, 40);
-    lv_obj_set_pos(rescan, GRID_MX + 480, 46);
+    /* Clear of "Show:" above, which ends at GRID_MX+530. */
+    lv_obj_set_pos(rescan, GRID_MX + 540, 46);
 
     /* A fixed pool of rows, rewritten in place and paged.
      *
@@ -937,6 +938,7 @@ static void browser_build(const char *heading)
     lv_obj_set_size(next, 70, 40);
     lv_obj_align(next, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 220, -12);
 
+    ui_check_overlaps(s_root, "metric browser");
     rescan_cb(NULL);
 }
 

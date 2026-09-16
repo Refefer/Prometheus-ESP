@@ -44,5 +44,19 @@ lv_obj_t *make_divider(lv_obj_t *parent, lv_coord_t w);
 /* A small filled circle -- status dots, freshness indicators, page dots. */
 lv_obj_t *make_dot(lv_obj_t *parent, lv_coord_t d, lv_color_t colour);
 
+/*
+ * Logs any two visible siblings whose rectangles intersect.
+ *
+ * These sheets are positioned with absolute pixel arithmetic, so a control
+ * that grows or moves silently slides under its neighbour -- twice now a
+ * button has been half-hidden behind another and only a person looking at the
+ * glass noticed. Call it once after building and refreshing a sheet; it is
+ * O(n^2) over a few dozen children, which is nothing next to opening one.
+ *
+ * Hidden children are skipped: rows that deliberately share a slot and show
+ * one set at a time are correct, not overlapping.
+ */
+void ui_check_overlaps(lv_obj_t *root, const char *what);
+
 /* A transient message over everything, auto-dismissed. */
 void ui_toast(const char *text, severity_t sev, uint32_t ms);

@@ -690,28 +690,38 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
 
     /* Which screen the tile lives on. Without this a tile placed on a second
      * screen could only be deleted, never brought back. */
+    /*
+     * Up on the Units row rather than the bottom one, where it ran under the
+     * Remove button: Remove is anchored to the right edge and 180 wide, so
+     * the bottom row has nothing usable past GRID_MX+590.
+     */
     lv_obj_t *scap = make_label(s_root, FONT_S, COL_DIM);
     lv_label_set_text(scap, "Screen");
-    lv_obj_align(scap, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 490, -62);
+    lv_obj_set_pos(scap, GRID_MX + 615, 336);
 
     lv_obj_t *sprev = make_btn(s_root, LV_SYMBOL_LEFT, screen_cb,
                                (void *)(intptr_t)-1);
-    lv_obj_set_size(sprev, 40, BTN_H);
-    lv_obj_align(sprev, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 490, -12);
+    lv_obj_set_size(sprev, 40, 38);
+    lv_obj_set_pos(sprev, GRID_MX + 615, 356);
 
+    /* Fixed width and centred, so the gap to the buttons does not depend on
+     * how wide "1 / 3" happens to render. */
     s_scr_lbl = make_label(s_root, FONT_M, COL_TEXT);
-    lv_obj_align(s_scr_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 540, -22);
+    lv_obj_set_width(s_scr_lbl, 52);
+    lv_obj_set_style_text_align(s_scr_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_scr_lbl, GRID_MX + 659, 366);
 
     lv_obj_t *snext = make_btn(s_root, LV_SYMBOL_RIGHT, screen_cb,
                                (void *)(intptr_t)1);
-    lv_obj_set_size(snext, 40, BTN_H);
-    lv_obj_align(snext, LV_ALIGN_BOTTOM_LEFT, GRID_MX + 575, -12);
+    lv_obj_set_size(snext, 40, 38);
+    lv_obj_set_pos(snext, GRID_MX + 715, 356);
 
     lv_obj_t *rm = make_btn(s_root, LV_SYMBOL_TRASH "  Remove", remove_cb, NULL);
     lv_obj_set_size(rm, 180, BTN_H);
     lv_obj_align(rm, LV_ALIGN_BOTTOM_RIGHT, -GRID_MX, -12);
 
     refresh();
+    ui_check_overlaps(s_root, "panel settings");
 }
 
 bool ui_panelcfg_is_open(void) { return s_root != NULL; }

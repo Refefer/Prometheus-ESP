@@ -1,5 +1,6 @@
 #include "ui_widgets.h"
 #include "ui_layout.h"
+#include "esp_log.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -247,6 +248,40 @@ static void toast_expire(lv_timer_t *t)
     (void)t;
     if (s_toast) { lv_obj_del(s_toast); s_toast = NULL; }
     if (s_toast_timer) { lv_timer_del(s_toast_timer); s_toast_timer = NULL; }
+}
+
+static const char *TAG = "ui";
+
+void ui_check_overlaps(lv_obj_t *root, const char *what)
+{
+    if (root == NULL) return;
+    lv_obj_update_layout(root);
+
+    uint32_t n = lv_obj_get_child_cnt(root);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *a = lv_obj_get_child(root, i);
+        if (lv_obj_has_flag(a, LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_area_t ra;
+        lv_obj_get_coords(a, &ra);
+
+        for (uint32_t j = i + 1; j < n; j++) {
+            lv_obj_t *b = lv_obj_get_child(root, j);
+            if (lv_obj_has_flag(b, LV_OBJ_FLAG_HIDDEN)) continue;
+            lv_area_t rb;
+            lv_obj_get_coords(b, &rb);
+
+            if (ra.x2 < rb.x1 || rb.x2 < ra.x1 ||
+                ra.y2 < rb.y1 || rb.y2 < ra.y1) continue;
+
+            /* ESP_LOG, not LV_LOG: LVGL's logging is compiled out in this
+             * build, and a guard that reports nothing is worse than none. */
+            ESP_LOGW(TAG, "%s: children %u and %u overlap "
+                          "(%d,%d..%d,%d vs %d,%d..%d,%d)",
+                        what, (unsigned)i, (unsigned)j,
+                        (int)ra.x1, (int)ra.y1, (int)ra.x2, (int)ra.y2,
+                        (int)rb.x1, (int)rb.y1, (int)rb.x2, (int)rb.y2);
+        }
+    }
 }
 
 void ui_toast(const char *text, severity_t sev, uint32_t ms)
