@@ -469,8 +469,10 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
         if (lv_bar_get_value(p->bar) != want) {
             lv_bar_set_value(p->bar, want, LV_ANIM_OFF);
         }
-        bg_color_if_changed(p->bar, app_theme_sev(t->last_sev));
-        lv_obj_set_style_bg_color(p->bar, app_theme_sev(t->last_sev), LV_PART_INDICATOR);
+        lv_color_t c = app_theme_ramp((ramp_t)t->spec->ramp, frac,
+                                      app_theme_sev(t->last_sev));
+        bg_color_if_changed(p->bar, c);
+        lv_obj_set_style_bg_color(p->bar, c, LV_PART_INDICATOR);
     }
 
     char a[24], b[24];
@@ -546,8 +548,13 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
         if (frac > 1) frac = 1;
         int16_t want = (int16_t)(frac * CHART_SPAN);
         if (lv_arc_get_value(p->arc) != want) lv_arc_set_value(p->arc, want);
-        lv_obj_set_style_arc_color(p->arc, app_theme_sev(t->last_sev),
-                                   LV_PART_INDICATOR);
+        /* A ramp colours by position in the range; without one the arc takes
+         * the threshold colour, which on a panel with no thresholds set is a
+         * single colour forever. */
+        lv_obj_set_style_arc_color(p->arc,
+            app_theme_ramp((ramp_t)t->spec->ramp, frac,
+                           app_theme_sev(t->last_sev)),
+            LV_PART_INDICATOR);
     }
 }
 

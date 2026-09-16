@@ -155,6 +155,22 @@ absent one -- it is wrong rather than merely empty.
 Tiles exist for every screen, not just the one on display, so paging is a
 visibility change. Swipe to a page and its charts are already drawn.
 
+### Themes and colour
+
+Six palettes ship -- Night Ops, Daylight, Emerald, Nord, Amber, Mono -- picked
+from the Theme dropdown in the settings sheet and stored in `device.theme`.
+Switching rebuilds the whole widget tree rather than restyling it in place:
+every colour is read at build time, so a palette works everywhere by
+construction and no renderer has a restyle hook to keep in step.
+
+`panel.ramp` colours a gauge or bar by where the value sits in its range:
+`heat` runs ok to crit as it rises, `cool` reverses that for things where low
+is the problem, `series` steps through the categorical palette, and `none`
+takes the threshold colour -- which on a panel with no `warn`/`crit` set is
+one colour forever, which is why a gauge looks monochrome by default. The ramp
+is mixed from the active theme's own colours, so it follows the palette rather
+than fighting it.
+
 ### Screens
 
 A tile carries a `screen`, and swiping pages between them. Screens are not a

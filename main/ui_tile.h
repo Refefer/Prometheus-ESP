@@ -38,6 +38,7 @@ typedef struct {
     float       vmin, vmax;       /* BAR/GAUGE range; NAN = auto from history */
     float       warn, crit;       /* NAN = no threshold */
     bool        lower_is_worse;   /* thresholds compare the other way */
+    uint8_t     ramp;             /* ramp_t: how the indicator is coloured */
     /* config_panel_fingerprint of the panel behind this tile. A tile whose
      * fingerprint changed is showing a different series, so its accumulated
      * history is no longer about what it is about to display. */

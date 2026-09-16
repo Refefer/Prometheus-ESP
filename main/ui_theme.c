@@ -130,6 +130,70 @@ const char *app_theme_name(theme_id_t id)
     return (id < THEME_COUNT) ? k_themes[id].name : "";
 }
 
+static char norm(char c)
+{
+    if (c >= 'A' && c <= 'Z') return (char)(c - 'A' + 'a');
+    return (c == ' ' || c == '-') ? '_' : c;
+}
+
+const char *app_theme_slug(theme_id_t id)
+{
+    static char buf[THEME_COUNT][20];
+    if (id >= THEME_COUNT) return "";
+    if (buf[id][0] == '\0') {
+        const char *n = k_themes[id].name;
+        size_t w = 0;
+        for (const char *p = n; *p && w < sizeof(buf[0]) - 1; p++) {
+            buf[id][w++] = norm(*p);
+        }
+        buf[id][w] = '\0';
+    }
+    return buf[id];
+}
+
+theme_id_t app_theme_from_name(const char *name)
+{
+    if (name == NULL || name[0] == '\0') return THEME_NIGHT_OPS;
+    for (int i = 0; i < THEME_COUNT; i++) {
+        const char *a = name, *b = k_themes[i].name;
+        while (*a && *b && norm(*a) == norm(*b)) { a++; b++; }
+        if (*a == '\0' && *b == '\0') return (theme_id_t)i;
+    }
+    return THEME_NIGHT_OPS;      /* an unknown name is the default, not a crash */
+}
+
+lv_color_t app_theme_ramp(ramp_t r, float frac, lv_color_t fallback)
+{
+    const app_theme_t *t = app_theme();
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    switch (r) {
+    case RAMP_COOL: frac = 1.0f - frac;   /* fall through */
+    case RAMP_HEAT: {
+        /*
+         * Two segments, ok -> warn -> crit. lv_color_mix takes the weight of
+         * its FIRST argument, so the ratio is inverted against the position
+         * within the segment.
+         */
+        if (frac < 0.5f) {
+            uint8_t m = (uint8_t)(frac * 2.0f * 255.0f);
+            return lv_color_mix(t->warn, t->ok, m);
+        }
+        uint8_t m = (uint8_t)((frac - 0.5f) * 2.0f * 255.0f);
+        return lv_color_mix(t->crit, t->warn, m);
+    }
+    case RAMP_SERIES: {
+        int i = (int)(frac * (THEME_SERIES_N - 1) + 0.5f);
+        if (i < 0) i = 0;
+        if (i >= THEME_SERIES_N) i = THEME_SERIES_N - 1;
+        return t->series[i];
+    }
+    default:
+        return fallback;
+    }
+}
+
 const char *app_theme_options(void)
 {
     /* Built once; lv_dropdown/lv_roller want a single newline-joined string. */

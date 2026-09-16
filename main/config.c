@@ -81,6 +81,11 @@ static const enum_name_t k_scales[] = {
     { 0, NULL },
 };
 
+static const enum_name_t k_ramps[] = {
+    { RAMP_NONE, "none" }, { RAMP_HEAT, "heat" },
+    { RAMP_COOL, "cool" }, { RAMP_SERIES, "series" }, { 0, NULL },
+};
+
 static const enum_name_t k_fmts[] = {
     { FMT_AUTO, "auto" }, { FMT_RAW, "raw" }, { FMT_SI, "si" },
     { FMT_IEC, "bytes" }, { FMT_PCT_01, "percent" },
@@ -215,7 +220,7 @@ static const char *const k_keys_endpoint[] = {
 };
 static const char *const k_keys_screen[] = { "title", "pinned", NULL };
 static const char *const k_keys_panel[] = {
-    "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "group", "prefix", "suffix", "terms",
+    "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "group", "prefix", "suffix", "ramp", "terms",
     "vmin", "vmax", "warn", "crit", "multi", "lower_is_worse",
     "screen", "col", "row", "w", "h",
     /* schema 1 spelled a panel's single term inline; still accepted */
@@ -314,6 +319,7 @@ static void write_presentation(FILE *f)
         fprintf(f, ", \"group\": %s", p->group ? "true" : "false");
         fputs(", \"prefix\": ", f); write_escaped(f, p->prefix);
         fputs(", \"suffix\": ", f); write_escaped(f, p->suffix);
+        fputs(", \"ramp\": ", f);   write_escaped(f, enum_to_name(k_ramps, p->ramp));
         fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
                    " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
                 p->lower_is_worse ? "true" : "false",
@@ -659,6 +665,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             p->group = get_bool(it, "group", false);
             get_str(it, "prefix", p->prefix, sizeof(p->prefix));
             get_str(it, "suffix", p->suffix, sizeof(p->suffix));
+            p->ramp = (uint8_t)name_to_enum_ck(it, "ramp", k_ramps, RAMP_NONE, pe, where);
             p->lower_is_worse = get_bool(it, "lower_is_worse", false);
             p->screen = (uint8_t)get_int(it, "screen", 0);
             p->col = (uint8_t)get_int(it, "col", 0);
@@ -952,7 +959,8 @@ void config_enum_values(const char *which, char *out, size_t cap)
         strcmp(which, "reduce") == 0 ? k_reduces :
         strcmp(which, "agg")    == 0 ? k_aggs    :
         strcmp(which, "op")     == 0 ? k_ops     :
-        strcmp(which, "scale")  == 0 ? k_scales  : NULL;
+        strcmp(which, "scale")  == 0 ? k_scales  :
+        strcmp(which, "ramp")   == 0 ? k_ramps   : NULL;
     if (tab == NULL) return;
 
     size_t w = 0;

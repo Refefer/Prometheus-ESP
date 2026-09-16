@@ -133,6 +133,9 @@ typedef struct {
      * ladder cannot express. Presentation only, like scale and group. */
     char        prefix[8];
     char        suffix[8];
+    /* How the indicator is coloured: one theme colour, or a ramp across the
+     * range. Presentation only. */
+    uint8_t     ramp;
     uint8_t     screen;              /* index into screens[] */
     uint8_t     col, row, w, h;
     /* A multi-series panel matches every series of its metric rather than one,

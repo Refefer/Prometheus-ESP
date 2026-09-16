@@ -41,8 +41,42 @@ const char        *app_theme_name(theme_id_t id);
 /* Newline-joined names, for lv_dropdown/lv_roller options. */
 const char        *app_theme_options(void);
 
+/* The stored spelling ("night_ops") and the lookup back from it. Matching is
+ * loose over case and the separators, so both the slug and the display name
+ * resolve -- a config written by hand should not have to guess. */
+const char        *app_theme_slug(theme_id_t id);
+theme_id_t         app_theme_from_name(const char *name);
+
+/*
+ * Rebuild the whole widget tree so a new theme takes effect.
+ *
+ * Implemented by the dashboard, declared here because the theme is the only
+ * reason to call it. Everything on screen is built from config, so this
+ * reuses the ordinary build path rather than needing a restyle hook on every
+ * renderer -- which is why a palette can be added without touching a tile.
+ */
+void ui_restyle(void);
+
 /* Colour for a severity, resolved against the current palette. */
 lv_color_t app_theme_sev(severity_t s);
+
+/* How a value-proportional indicator picks its colour. */
+typedef enum {
+    RAMP_NONE = 0,   /* one colour, from the panel's thresholds */
+    RAMP_HEAT,       /* ok -> warn -> crit as the value rises */
+    RAMP_COOL,       /* the reverse, for things where low is the problem */
+    RAMP_SERIES,     /* stepped through the categorical palette */
+    RAMP_COUNT,
+} ramp_t;
+
+/*
+ * The colour for `frac` (0..1) of the way through a panel's range.
+ *
+ * Built from the theme's own semantic colours rather than a fixed gradient,
+ * so a ramp follows the palette instead of fighting it -- Daylight's red is
+ * not Night Ops' red, and a hard-coded spectrum would look wrong in both.
+ */
+lv_color_t app_theme_ramp(ramp_t r, float frac, lv_color_t fallback);
 
 /*
  * Shorthand used throughout the UI files. These deliberately re-read

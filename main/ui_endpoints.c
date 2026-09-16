@@ -24,6 +24,7 @@
 static const char *TAG = "endpoints";
 
 static lv_obj_t *s_root;
+static lv_obj_t *s_theme_dd;
 static lv_obj_t *s_url_btn, *s_url_lbl, *s_name_btn, *s_poll_lbl, *s_result;
 static void (*s_on_close)(void);
 
@@ -260,7 +261,20 @@ static void close_overlay(void)
     lv_obj_del(s_root);
     s_root = NULL;
     s_url_btn = s_url_lbl = s_name_btn = s_poll_lbl = s_result = NULL;
+    s_theme_dd = NULL;
     if (s_on_close) s_on_close();
+}
+
+/* Recorded now, applied when the sheet closes: applying a palette rebuilds
+ * the whole tree, and this sheet is part of the tree. */
+static void theme_cb(lv_event_t *e)
+{
+    uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+    if (sel >= THEME_COUNT) return;
+    config_t *c = config_get();
+    strncpy(c->device.theme, app_theme_slug((theme_id_t)sel),
+            sizeof(c->device.theme) - 1);
+    config_touch();
 }
 
 static void cancel_cb(lv_event_t *e) { (void)e; close_overlay(); }
@@ -350,6 +364,17 @@ void ui_endpoints_open(void (*on_close)(void))
     lv_obj_set_pos(pbtn, GRID_MX + 330, 180);
     s_poll_lbl = lv_obj_get_child(pbtn, 0);
     label_set_fmt_if_changed(s_poll_lbl, "every %ds", s_poll_s);
+
+    /* Theme. The palettes have existed since the first UI commit and nothing
+     * ever offered them, so the device has only ever been one colour. */
+    lv_obj_t *thc = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(thc, "Theme");
+    lv_obj_set_pos(thc, GRID_MX + 545, 158);
+
+    s_theme_dd = make_dropdown(s_root, app_theme_options(), theme_cb, NULL);
+    lv_obj_set_size(s_theme_dd, 220, FIELD_H);
+    lv_obj_set_pos(s_theme_dd, GRID_MX + 545, 180);
+    lv_dropdown_set_selected(s_theme_dd, (uint16_t)app_theme_id());
 
     lv_obj_t *tbtn = make_btn(s_root, LV_SYMBOL_REFRESH "  Test", test_cb, NULL);
     lv_obj_set_size(tbtn, 160, BTN_H);

@@ -313,6 +313,7 @@ static void build_tiles(lv_obj_t *scr)
         sp->vmin  = p->vmin; sp->vmax = p->vmax;
         sp->warn  = p->warn; sp->crit = p->crit;
         sp->lower_is_worse = p->lower_is_worse;
+        sp->ramp  = p->ramp;
         sp->data_fp = config_panel_fingerprint(p);
 
         adopt[want_n] = -1;
@@ -598,8 +599,46 @@ static void build_dashboard(void)
 
 }
 
+/*
+ * Tear the tree down and build it again, which is how a theme is applied.
+ *
+ * Every colour is read at build time from app_theme(), so there is no
+ * restyle hook on any renderer to keep in step -- a new palette works
+ * everywhere by construction. ~20ms, and it only happens when someone picks
+ * a different one.
+ */
+void ui_restyle(void)
+{
+    if (modal_open()) return;          /* a sheet owns the screen; it rebuilds on close */
+
+    lv_obj_t *scr = lv_scr_act();
+    for (int i = 0; i < s_tile_n; i++) {
+        if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
+    }
+    s_tile_n = 0;
+    s_hole_n = 0;
+    s_dot_n  = 0;
+    memset(s_holes, 0, sizeof(s_holes));
+    memset(s_dots,  0, sizeof(s_dots));
+
+    lv_obj_clean(scr);
+    s_fbar = s_hdr_title = s_hdr_status = NULL;
+    s_ftr_left = s_ftr_right = s_empty = NULL;
+
+    build_dashboard();
+    s_seen_gen = UINT32_MAX;
+}
+
 static void rebuild_dashboard(void)
 {
+    /* A settings sheet can have changed the palette; applying it is a whole
+     * rebuild, so it happens here on close rather than under the sheet. */
+    theme_id_t want = app_theme_from_name(config_get()->device.theme);
+    if (want != app_theme_id()) {
+        app_theme_set(want);
+        ui_restyle();
+        return;
+    }
     set_hdr_title();
 }
 
@@ -782,6 +821,8 @@ void app_main(void)
         if (config_load() != ESP_OK && config_was_reset()) {
             ESP_LOGW(TAG, "starting from factory defaults");
         }
+        /* Before a single widget exists: colours are read at build time. */
+        app_theme_set(app_theme_from_name(config_get()->device.theme));
         ui_kbd_init();
         if (secrets_have_wifi()) {
             build_dashboard();

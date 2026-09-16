@@ -627,15 +627,16 @@ static esp_err_t get_schema(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    char ek[160], ef[200], er[100], ea[80], eo[80], es[120];
+    char ek[160], ef[200], er[100], ea[80], eo[80], es[120], ep[80];
     config_enum_values("kind",   ek, sizeof(ek));
     config_enum_values("fmt",    ef, sizeof(ef));
     config_enum_values("reduce", er, sizeof(er));
     config_enum_values("agg",    ea, sizeof(ea));
     config_enum_values("op",     eo, sizeof(eo));
     config_enum_values("scale",  es, sizeof(es));
+    config_enum_values("ramp",   ep, sizeof(ep));
 
-    char buf[1420];
+    char buf[1600];
     snprintf(buf, sizeof(buf),
 "{\n"
 "  \"schema\": %u,\n"
@@ -645,6 +646,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "  \"enums\": {\n"
 "    \"kind\":   [%s],\n"
 "    \"scale\":  [%s],\n"
+"    \"ramp\":   [%s],\n"
 "    \"fmt\":    [%s],\n"
 "    \"reduce\": [%s],\n"
 "    \"agg\":    [%s],\n"
@@ -652,7 +654,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "  },\n",
         (unsigned)CFG_SCHEMA_VERSION, GRID_COLS, GRID_ROWS,
         CFG_MAX_PANELS, CFG_MAX_TERMS, CFG_MAX_SCREENS,
-        ek, es, ef, er, ea, eo);
+        ek, es, ep, ef, er, ea, eo);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_sendstr_chunk(req,
@@ -666,6 +668,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"panel.warn/crit\":\"threshold colouring; null means none\",\n"
 "    \"panel.multi\":    \"show every matching series as ranked rows instead of one number\",\n"
 "    \"panel.prefix/suffix\": \"free text wrapped around the value -- \\\"$\\\" or \\\" EUR\\\" -- for labels the SI ladder cannot express. Distinct from unit, which is part of the magnitude and moves with the prefix. The large digit faces carry only digits, punctuation and the currency marks $ c/ L- Y= E=; anything else drops the value to a smaller text face rather than vanishing.\",\n"
+"    \"panel.ramp\":     \"how a gauge or bar colours its indicator: none takes the threshold colour, which on a panel with no warn/crit set is one colour forever; heat runs ok to crit as the value rises, cool reverses it, series steps through the categorical palette. Built from the active theme's own colours, so it follows the palette rather than fighting it.\",\n"
 "    \"panel.group\":    \"thousands separators in the value: 17,321 rather than 17321. Only affects formats that render bare digits, and only bites once a number is four digits long -- which in practice means alongside a scale pin, since an auto prefix keeps it to three.\",\n"
 "    \"panel.scale\":    \"pins the SI/IEC prefix so the unit stops moving as the value does; auto keeps three significant digits instead. The names are the SI ladder and map by position on a byte panel: k is KiB, M is MiB. Ignored by formats with no ladder (percent, duration, bool).\",\n"
 "    \"term.sel\":       \"metric{label=\\\"value\\\"}; a label value may contain * as a glob\",\n"
