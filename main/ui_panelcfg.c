@@ -22,6 +22,17 @@ static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
 static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
 static lv_obj_t *s_scr_lbl;
 
+/*
+ * The panel as it was when the sheet opened, so Cancel has something to put
+ * back. Every control here writes the config as it is touched -- there is no
+ * save button anywhere in this app, because on a wall panel an explicit save
+ * is mostly a way to lose work -- which means discarding is the operation
+ * that needs a record, not committing.
+ */
+static cfg_panel_t s_before;
+static uint8_t     s_before_screens;
+static bool        s_before_valid;
+
 static int screens_reachable(void);
 static lv_obj_t *s_map_cell[GRID_ROWS][GRID_COLS];
 static uint16_t  s_id;
@@ -496,15 +507,49 @@ static void close_overlay(void)
     config_flush();
     lv_obj_del(s_root);
     s_root = NULL;
+    s_before_valid = false;
     memset(s_kind_btn, 0, sizeof(s_kind_btn));
     if (s_on_close) s_on_close();
 }
 
 static void done_cb(lv_event_t *e)   { (void)e; close_overlay(); }
 
+static void cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    cfg_panel_t *p = panel();
+    if (p != NULL && s_before_valid) {
+        *p = s_before;
+
+        /*
+         * Moving a tile to a new screen grows the screen list, so undoing the
+         * move has to shrink it again -- but only if nothing else ended up
+         * there, or the config would name a screen that no longer exists and
+         * the next push of it would be refused.
+         */
+        config_t *c = config_get();
+        if (c->n_screens > s_before_screens) {
+            bool needed = false;
+            for (int i = 0; i < c->n_panels; i++) {
+                if (c->panels[i].sel[0] && c->panels[i].screen >= s_before_screens) {
+                    needed = true;
+                    break;
+                }
+            }
+            if (!needed) c->n_screens = s_before_screens;
+        }
+        config_touch();
+    }
+    close_overlay();
+}
+
 static void remove_cb(lv_event_t *e)
 {
     (void)e;
+    /* Removing closes the sheet, so there is no Cancel left to press -- and
+     * restoring a panel that no longer exists is not what the snapshot is
+     * for. */
+    s_before_valid = false;
     config_panel_remove(s_id);
     close_overlay();
 }
@@ -514,7 +559,11 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
     if (s_root) return;
     s_id = panel_id;
     s_on_close  = on_close;
-    if (panel() == NULL) return;
+    cfg_panel_t *p0 = panel();
+    if (p0 == NULL) return;
+    s_before         = *p0;
+    s_before_screens = config_get()->n_screens;
+    s_before_valid   = true;
 
     s_root = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_root, SCR_W, SCR_H);
@@ -533,8 +582,15 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
 
     s_sel_lbl = make_label(s_root, FONT_XS, COL_DIM);
     lv_label_set_long_mode(s_sel_lbl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(s_sel_lbl, 520);
+    /* Narrower than it was: the selector has to give up the space Cancel
+     * needs, and it elides rather than colliding. */
+    lv_obj_set_width(s_sel_lbl, 400);
     lv_obj_set_pos(s_sel_lbl, 90, 16);
+
+    lv_obj_t *cancel = make_btn(s_root, LV_SYMBOL_CLOSE "  Cancel",
+                                cancel_cb, NULL);
+    lv_obj_set_size(cancel, 130, 34);
+    lv_obj_set_pos(cancel, SCR_W - 280 - GRID_MX, 6);
 
     lv_obj_t *done = make_btn_accent(s_root, LV_SYMBOL_OK "  Done", done_cb, NULL);
     lv_obj_set_size(done, 130, 34);
