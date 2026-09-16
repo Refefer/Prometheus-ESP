@@ -41,6 +41,7 @@ static void set_defaults_into(config_t *cfg)
     cfg->schema  = CFG_SCHEMA_VERSION;
     cfg->next_id = 1;
     strncpy(cfg->device.theme, "night_ops", sizeof(cfg->device.theme) - 1);
+    strncpy(cfg->device.tz, "UTC0", sizeof(cfg->device.tz) - 1);
     cfg->device.poll_default_s = 10;
     cfg->device.rotate_dwell_s = 20;
 
@@ -212,7 +213,7 @@ static const char *const k_keys_root[] = {
     "device", "endpoints", "screens", "panels", NULL,
 };
 static const char *const k_keys_device[] = {
-    "theme", "poll_default_s", "rotate_enabled", "rotate_dwell_s", NULL,
+    "theme", "tz", "poll_default_s", "rotate_enabled", "rotate_dwell_s", NULL,
 };
 static const char *const k_keys_endpoint[] = {
     "id", "name", "kind", "url", "poll_s", "timeout_ms",
@@ -346,6 +347,7 @@ static esp_err_t write_config(const char *path)
 
     fputs("  \"device\": { \"theme\": ", f);
     write_escaped(f, s_cfg.device.theme);
+    fputs(", \"tz\": ", f); write_escaped(f, s_cfg.device.tz);
     fprintf(f, ", \"poll_default_s\": %u, \"rotate_enabled\": %s,"
                " \"rotate_dwell_s\": %u },\n",
             (unsigned)s_cfg.device.poll_default_s,
@@ -533,6 +535,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     if (cJSON_IsObject(d)) {
         check_keys(d, k_keys_device, pe, "device");
         get_str(d, "theme", cfg->device.theme, sizeof(cfg->device.theme));
+        get_str(d, "tz", cfg->device.tz, sizeof(cfg->device.tz));
         cfg->device.poll_default_s = (uint16_t)get_int(d, "poll_default_s", 10);
         cfg->device.rotate_enabled = get_bool(d, "rotate_enabled", false);
         cfg->device.rotate_dwell_s = (uint16_t)get_int(d, "rotate_dwell_s", 20);

@@ -1,4 +1,5 @@
 #include "webcfg.h"
+#include "timekeep.h"
 
 #include "config.h"
 #include "esp_http_server.h"
@@ -415,16 +416,23 @@ static esp_err_t get_status(httpd_req_t *req)
     const config_t *c = config_get();
 
     char out[320];
+    /* Whether the clock has been set is a thing you want to know from here:
+     * it is the one piece of device state with no other readout. */
+    char clk[40] = "";
+    timekeep_now(clk, sizeof(clk), NULL, 0);
+
     snprintf(out, sizeof(out),
              "{\"app\":\"prometheus-panel\",\"ip\":\"%s\",\"rssi\":%d,"
              "\"uptime_s\":%llu,\"panels\":%u,\"endpoints\":%u,"
-             "\"schema\":%u,\"free_internal\":%u,\"free_psram\":%u}\n",
+             "\"schema\":%u,\"free_internal\":%u,\"free_psram\":%u,"
+             "\"clock\":\"%s\",\"tz\":\"%s\"}\n",
              ip, (int)rssi,
              (unsigned long long)(esp_timer_get_time() / 1000000),
              (unsigned)c->n_panels, (unsigned)c->n_endpoints,
              (unsigned)CFG_SCHEMA_VERSION,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             clk[0] ? clk : "unsynced", c->device.tz);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, out);
     return ESP_OK;
@@ -659,6 +667,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 
     httpd_resp_sendstr_chunk(req,
 "  \"fields\": {\n"
+"    \"device.tz\":      \"POSIX TZ string for the header clock, e.g. UTC0, PST8PDT,M3.2.0,M11.1.0 or GMT0BST,M3.5.0/1,M10.5.0. Note the sign convention is inverted from UTC offsets: PST8PDT means UTC-8. Only the clock reads it; every measurement is taken against the monotonic clock.\",\n"
 "    \"panel.sel\":      \"mirror of terms[0].sel; written by the device, ignored on input\",\n"
 "    \"panel.col/row\":  \"top-left cell; col+w and row+h must stay inside the grid\",\n"
 "    \"panel.screen\":   \"which page the tile is on, swiped between; must be < the length of screens[]\",\n"

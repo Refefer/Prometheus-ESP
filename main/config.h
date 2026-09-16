@@ -160,6 +160,10 @@ typedef struct {
 
 typedef struct {
     char     theme[16];
+    /* POSIX TZ string, e.g. "UTC0" or "PST8PDT,M3.2.0,M11.1.0". The header
+     * clock is the only thing that reads it -- every measurement in this app
+     * is taken against the monotonic clock instead. */
+    char     tz[40];
     uint16_t poll_default_s;
     bool     rotate_enabled;
     uint16_t rotate_dwell_s;

@@ -41,6 +41,19 @@ lv_obj_t *make_dropdown(lv_obj_t *parent, const char *options,
                         lv_event_cb_t cb, void *user_data);
 lv_obj_t *make_switch(lv_obj_t *parent, bool on, lv_event_cb_t cb, void *user_data);
 lv_obj_t *make_divider(lv_obj_t *parent, lv_coord_t w);
+/*
+ * A four-bar signal strength indicator, 26x18.
+ *
+ * Bars rather than the single LV_SYMBOL_WIFI glyph, because one glyph can
+ * only carry strength as colour and colour alone is a poor scale -- the
+ * height tells you how much and the colour tells you whether that is a
+ * problem, and either one alone is readable across a room.
+ */
+lv_obj_t *make_signal(lv_obj_t *parent);
+
+/* level 0..4; 0 draws every bar dim, which is what "no link" looks like. */
+void signal_set_level(lv_obj_t *sig, int level);
+
 /* A small filled circle -- status dots, freshness indicators, page dots. */
 lv_obj_t *make_dot(lv_obj_t *parent, lv_coord_t d, lv_color_t colour);
 

@@ -29,6 +29,7 @@
 #include "ui_browser.h"
 #include "ui_panelcfg.h"
 #include "ui_layouts.h"
+#include "timekeep.h"
 #include "ui_endpoints.h"
 #include "ui_setup.h"
 #include "webcfg.h"
@@ -167,7 +168,9 @@ static int          s_tile_n;
 static lv_obj_t    *s_holes[GRID_COLS * GRID_ROWS];
 static int          s_hole_n;
 static lv_obj_t    *s_hdr_title;
-static lv_obj_t    *s_hdr_status;
+static lv_obj_t    *s_hdr_sig;     /* wifi strength bars */
+static lv_obj_t    *s_hdr_time;
+static lv_obj_t    *s_hdr_date;
 static lv_obj_t    *s_fbar;
 static lv_obj_t    *s_ftr_left;
 static lv_obj_t    *s_ftr_right;
@@ -199,6 +202,22 @@ static bool modal_open(void)
     return ui_panelcfg_is_open() || ui_browser_is_open() ||
            ui_endpoints_is_open() || ui_setup_is_open() ||
            ui_layouts_is_open();
+}
+
+/*
+ * RSSI to a four-bar scale.
+ *
+ * The thresholds are the ones that matter in practice rather than a linear
+ * split: above -55 is as good as it gets, below -80 is where a scrape starts
+ * timing out, and the two in between are the useful middle.
+ */
+static int wifi_level(int8_t rssi)
+{
+    if (!wifi_mgr_is_connected()) return 0;
+    if (rssi >= -55) return 4;
+    if (rssi >= -65) return 3;
+    if (rssi >= -75) return 2;
+    return 1;
 }
 
 /* One past the highest screen anything sits on. Always at least 1. */
@@ -599,12 +618,23 @@ static void build_dashboard(void)
     lv_obj_set_pos(s_hdr_title, GRID_MX, 8);
     /* Bounded and elided rather than left to grow: an endpoint and a layout
      * name concatenated can run under the status readout. */
-    lv_obj_set_width(s_hdr_title, 370);
+    lv_obj_set_width(s_hdr_title, 270);
     lv_label_set_long_mode(s_hdr_title, LV_LABEL_LONG_DOT);
     set_hdr_title();
 
-    s_hdr_status = make_label(scr, FONT_S, COL_DIM);
-    lv_obj_set_pos(s_hdr_status, 400, 14);
+    /*
+     * Signal strength and the time, where the IP address used to be. An IP is
+     * something you need once, when setting the device up, and it is in the
+     * settings sheet; the clock and the link are what you glance at.
+     */
+    s_hdr_sig = make_signal(scr);
+    lv_obj_set_pos(s_hdr_sig, 296, 11);
+
+    s_hdr_time = make_label(scr, FONT_L, COL_TEXT);
+    lv_obj_set_pos(s_hdr_time, 336, 1);
+
+    s_hdr_date = make_label(scr, FONT_XS, COL_DIM);
+    lv_obj_set_pos(s_hdr_date, 336, 24);
 
     lv_obj_t *wifi = make_btn(scr, LV_SYMBOL_WIFI, reopen_setup_cb, NULL);
     lv_obj_set_size(wifi, 52, 30);
@@ -693,7 +723,8 @@ void ui_restyle(void)
     memset(s_dots,  0, sizeof(s_dots));
 
     lv_obj_clean(scr);
-    s_fbar = s_hdr_title = s_hdr_status = NULL;
+    s_fbar = s_hdr_title = NULL;
+    s_hdr_sig = s_hdr_time = s_hdr_date = NULL;
     s_ftr_left = s_ftr_right = s_empty = NULL;
 
     s_hist_kept = 0;
@@ -768,6 +799,7 @@ static void dashboard_tick(lv_timer_t *timer)
         /* A pushed config can change the palette too, and that is a rebuild
          * rather than a repaint. */
         if (apply_theme_if_changed()) return;
+        timekeep_set_tz(config_get()->device.tz);
 
         build_tiles(lv_scr_act());
         s_seen_gen = UINT32_MAX;
@@ -779,6 +811,16 @@ static void dashboard_tick(lv_timer_t *timer)
                                                        : c->device.poll_default_s);
         }
     }
+
+    /* Started here rather than at boot: DNS cannot resolve a pool name before
+     * the link is up, and a failed first attempt would not be retried until
+     * the next update interval. Idempotent. */
+    if (wifi_mgr_is_connected()) timekeep_start();
+
+    char tbuf[12], dbuf[20];
+    timekeep_now(tbuf, sizeof(tbuf), dbuf, sizeof(dbuf));
+    label_set_if_changed(s_hdr_time, tbuf);
+    label_set_if_changed(s_hdr_date, dbuf);
 
     static int beat;
     if (beat++ % 20 == 0) {
@@ -855,11 +897,9 @@ static void dashboard_tick(lv_timer_t *timer)
             tile_update(s_tiles[t], &d);
         }
 
-        char ip[16] = ""; int8_t rssi = 0;
-        wifi_mgr_info(ip, sizeof(ip), &rssi);
-        label_set_fmt_if_changed(s_hdr_status, "%s   %d dBm", ip, (int)rssi);
-        text_color_if_changed(s_hdr_status,
-                              wifi_mgr_is_connected() ? COL_OK : COL_CRIT);
+        int8_t rssi = 0;
+        wifi_mgr_info(NULL, 0, &rssi);
+        signal_set_level(s_hdr_sig, wifi_level(rssi));
 
         label_set_fmt_if_changed(s_ftr_right,
                                  "%u samples  %u KB  %u ms   SRAM %uK  PSRAM %uK",
@@ -924,6 +964,7 @@ void app_main(void)
         }
         /* Before a single widget exists: colours are read at build time. */
         app_theme_set(app_theme_from_name(config_get()->device.theme));
+        timekeep_set_tz(config_get()->device.tz);
         ui_kbd_init();
         if (secrets_have_wifi()) {
             build_dashboard();

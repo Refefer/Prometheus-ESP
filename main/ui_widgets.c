@@ -252,6 +252,55 @@ static void toast_expire(lv_timer_t *t)
 
 static const char *TAG = "ui";
 
+#define SIG_BARS 4
+
+lv_obj_t *make_signal(lv_obj_t *parent)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, 26, 18);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    /* Bottom-aligned and climbing, so the shape reads as a ramp even before
+     * the colours are taken in. */
+    for (int i = 0; i < SIG_BARS; i++) {
+        lv_obj_t *b = lv_obj_create(box);
+        lv_coord_t h = (lv_coord_t)(5 + i * 4);
+        lv_obj_set_size(b, 4, h);
+        lv_obj_set_pos(b, i * 6, 18 - h);
+        lv_obj_set_style_radius(b, 1, 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    }
+    return box;
+}
+
+void signal_set_level(lv_obj_t *sig, int level)
+{
+    if (sig == NULL) return;
+    const app_theme_t *t = app_theme();
+
+    /*
+     * Colour says whether the link is a problem, height says how much signal
+     * there is. Four bars is fine, three is fine, two is worth noticing and
+     * one is nearly gone -- which maps onto the semantic palette directly.
+     */
+    lv_color_t on = level >= 3 ? t->ok : level == 2 ? t->warn : t->crit;
+
+    uint32_t n = lv_obj_get_child_cnt(sig);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *b = lv_obj_get_child(sig, i);
+        bool lit = ((int)i < level);
+        bg_color_if_changed(b, lit ? on : t->line);
+        opa_if_changed(b, lit ? LV_OPA_COVER : LV_OPA_40);
+    }
+}
+
 void ui_check_overlaps(lv_obj_t *root, const char *what)
 {
     if (root == NULL) return;

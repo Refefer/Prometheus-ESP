@@ -23,12 +23,14 @@ idf_component_register(
         "ui_browser.c"
         "ui_panelcfg.c"
         "ui_layouts.c"
+        "timekeep.c"
         "webcfg.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver esp_lcd esp_timer
         esp_wifi esp_http_client esp-tls esp_netif esp_event
         nvs_flash json app_update esp_http_server
+        lwip
         prom
 )
 

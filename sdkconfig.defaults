@@ -71,3 +71,9 @@ CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# The header clock. The default re-sync interval is an hour, and the RTC is
+# free-running between syncs -- a wall clock that is visibly wrong is worse
+# than no clock, so it checks every five minutes. One NTP exchange is under
+# 100 bytes.
+CONFIG_LWIP_SNTP_UPDATE_DELAY=300000

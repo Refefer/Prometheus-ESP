@@ -11,6 +11,7 @@
 #include "ui_kbd.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
+#include "ui_setup.h"
 #include "ui_widgets.h"
 
 #include "esp_heap_caps.h"
@@ -25,6 +26,7 @@ static const char *TAG = "endpoints";
 
 static lv_obj_t *s_root;
 static lv_obj_t *s_theme_dd;
+static lv_obj_t *s_net_lbl;
 static lv_obj_t *s_url_btn, *s_url_lbl, *s_name_btn, *s_poll_lbl, *s_result;
 static void (*s_on_close)(void);
 
@@ -262,7 +264,23 @@ static void close_overlay(void)
     s_root = NULL;
     s_url_btn = s_url_lbl = s_name_btn = s_poll_lbl = s_result = NULL;
     s_theme_dd = NULL;
+    s_net_lbl  = NULL;
     if (s_on_close) s_on_close();
+}
+
+/*
+ * Hands the screen to the WiFi wizard.
+ *
+ * Closes first rather than stacking a second full-screen sheet on the first:
+ * two overlapping modals means two things that both think they own the
+ * screen, and whichever closes last wins.
+ */
+static void wifi_cb(lv_event_t *e)
+{
+    (void)e;
+    void (*after)(void) = s_on_close;
+    close_overlay();
+    ui_setup_open(after);
 }
 
 /* Recorded now, applied when the sheet closes: applying a palette rebuilds
@@ -376,14 +394,34 @@ void ui_endpoints_open(void (*on_close)(void))
     lv_obj_set_pos(s_theme_dd, GRID_MX + 545, 180);
     lv_dropdown_set_selected(s_theme_dd, (uint16_t)app_theme_id());
 
+    /* Wi-Fi, reachable from here as well as from the header: this is the
+     * sheet people look in when something is not connecting. */
+    lv_obj_t *wbtn = make_btn(s_root, LV_SYMBOL_WIFI "  Wi-Fi setup", wifi_cb, NULL);
+    lv_obj_set_size(wbtn, 210, BTN_H);
+    lv_obj_set_pos(wbtn, GRID_MX + 190, 250);
+
+    /* The address, which used to sit in the header. It is a thing you need
+     * once, while setting the device up -- which is here. */
+    s_net_lbl = make_label(s_root, FONT_S, COL_DIM);
+    lv_obj_set_pos(s_net_lbl, GRID_MX + 420, 262);
+    {
+        char ip[16] = ""; int8_t rssi = 0;
+        wifi_mgr_info(ip, sizeof(ip), &rssi);
+        if (ip[0]) lv_label_set_text_fmt(s_net_lbl, "%s   %d dBm", ip, (int)rssi);
+        else       lv_label_set_text(s_net_lbl, "not connected");
+    }
+
     lv_obj_t *tbtn = make_btn(s_root, LV_SYMBOL_REFRESH "  Test", test_cb, NULL);
     lv_obj_set_size(tbtn, 160, BTN_H);
     lv_obj_set_pos(tbtn, GRID_MX + 8, 250);
 
+    /* Its own line below the buttons now, rather than beside the Test button
+     * where Wi-Fi setup and the address have gone. Elided rather than wrapped:
+     * two lines would run into the divider. */
     s_result = make_label(s_root, FONT_M, COL_DIM);
-    lv_obj_set_width(s_result, SCR_W - 2 * (GRID_MX + 8) - 180);
-    lv_label_set_long_mode(s_result, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(s_result, GRID_MX + 180, 258);
+    lv_obj_set_width(s_result, SCR_W - 2 * (GRID_MX + 8));
+    lv_label_set_long_mode(s_result, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(s_result, GRID_MX + 8, 296);
     label_set_if_changed(s_result, "not tested");
 
     /* config push */

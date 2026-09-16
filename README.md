@@ -155,6 +155,21 @@ absent one -- it is wrong rather than merely empty.
 Tiles exist for every screen, not just the one on display, so paging is a
 visibility change. Swipe to a page and its charts are already drawn.
 
+### The top bar
+
+Endpoint and layout on the left, then Wi-Fi strength as four bars, then the
+time and date. Bars rather than a single glyph: height says how much signal,
+colour says whether it is a problem, and either alone is readable across a
+room. The IP address moved to the settings sheet -- it is something you need
+once, while setting the device up, which is where that is done.
+
+The clock is SNTP, and `device.tz` is a POSIX TZ string (`EST5EDT,M3.2.0,M11.1.0`,
+`GMT0BST,M3.5.0/1,M10.5.0`). Note the sign convention is inverted from UTC
+offsets: `PST8PDT` means UTC-8. `GET /status` reports the clock, so "is it
+synced" is answerable without looking at the glass. Nothing else in the app
+reads wall time -- every rate, window and staleness check is taken against the
+monotonic clock, so a step correction disturbs nothing.
+
 ### Themes and colour
 
 Six palettes ship -- Night Ops, Daylight, Emerald, Nord, Amber, Mono -- picked
