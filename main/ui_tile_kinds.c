@@ -352,6 +352,21 @@ const tile_vt_t tile_chart_vt = {
     "Chart", 2, 2, TILE_SPARK, chartt_build, chartt_update, chart_destroy,
 };
 
+/*
+ * The range a ratio widget spans when the panel does not say.
+ *
+ * vmin/vmax are in the SOURCE domain, not the displayed one: a panel whose
+ * format is "percent" is fed a 0..1 ratio, so its full arc is 1.0, and
+ * setting vmax to 100 there pins the needle near zero while the number above
+ * it reads 99%. Defaulting from the format gets the common cases right
+ * without anyone having to know that.
+ */
+static float ratio_hi(const tile_inst_t *t, const tile_data_t *d)
+{
+    if (!isnan(t->spec->vmax)) return t->spec->vmax;
+    return d->fmt == FMT_PCT_100 ? 100.0f : 1.0f;
+}
+
 /* -------------------------------------------------------------- TILE_BAR */
 
 typedef struct { lv_obj_t *bar, *val, *suf, *range; } bar_priv_t;
@@ -394,7 +409,7 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     lv_obj_align_to(p->suf, p->val, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -6);
 
     float lo = isnan(t->spec->vmin) ? 0.0f : t->spec->vmin;
-    float hi = isnan(t->spec->vmax) ? 1.0f : t->spec->vmax;
+    float hi = ratio_hi(t, d);
     if (hi <= lo) hi = lo + 1.0f;
 
     if (d->valid) {
@@ -473,7 +488,7 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
     lv_obj_align(p->suf, LV_ALIGN_CENTER, 0, 22);
 
     float lo = isnan(t->spec->vmin) ? 0.0f : t->spec->vmin;
-    float hi = isnan(t->spec->vmax) ? 1.0f : t->spec->vmax;
+    float hi = ratio_hi(t, d);
     if (hi <= lo) hi = lo + 1.0f;
 
     if (d->valid) {
