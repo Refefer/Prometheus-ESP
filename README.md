@@ -162,6 +162,25 @@ curl      -H "X-Auth: $TOK" http://$D/layouts                     # list, and wh
 curl -X DELETE -H "X-Auth: $TOK" http://$D/layouts/vllm
 ```
 
+### What a push is checked against
+
+A pushed document is parsed into a scratch config, checked whole, and swapped
+in only if every check passes -- or rejected with one sentence naming the
+panel and saying what to fix. Nothing is half-applied.
+
+Names are checked against the tables the parser itself uses, so an unknown
+`kind` is refused rather than defaulted, and enum *numbers* are refused
+outright: they shift when an enum gains a member. Unknown fields are refused
+too, because in practice an unknown field is a misspelling of a known one, and
+silently dropping `colum` puts the tile at column zero with a 200 OK.
+
+Beyond the shape: every selector must parse, quantiles must be 0 to 1, a
+widget must fit its minimum span, ids must be unique, endpoints referenced
+must exist, `vmin` must be below `vmax`, and panels must not overlap on a
+screen or run off the grid. Exceeding a limit is refused rather than
+truncated -- a silently dropped thirteenth panel is a tile that never appears
+and never explains itself.
+
 ## Pushing configuration
 
 The touch UI is good for adjusting a tile. It is a poor place to express "sum

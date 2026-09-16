@@ -138,6 +138,13 @@ typedef struct {
     bool    pinned;      /* the auto-packer leaves a pinned screen alone */
 } cfg_screen_t;
 
+/*
+ * A rejection reason. Long enough to quote a selector in full or list every
+ * accepted value of an enum, because a truncated reason is one you have to
+ * guess at -- and the whole point of refusing is to say what to fix.
+ */
+#define CFG_ERR_MAX 320
+
 #define CFG_LAYOUT_NAME_MAX 24
 #define CFG_MAX_LAYOUTS     12
 

@@ -1,4 +1,5 @@
 #include "config.h"
+#include "prom_ident.h"
 #include "storage.h"
 #include "ui_layout.h"
 
@@ -8,11 +9,13 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <stdarg.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -99,6 +102,36 @@ static const enum_name_t k_ops[] = {
     { OP_DIFF, "diff" }, { OP_SUM, "sum" }, { 0, NULL },
 };
 
+/*
+ * Where a rejected document is described from.
+ *
+ * Carried through the parse rather than kept in a static, because two tasks
+ * can parse at once -- a push on the HTTP task and a layout activation on the
+ * LVGL task -- and the first error wins so the message names the first thing
+ * wrong rather than the last.
+ */
+typedef struct { char *msg; size_t cap; bool bad; } parse_err_t;
+
+static void perr(parse_err_t *pe, const char *fmt, ...)
+{
+    if (pe == NULL || pe->bad) return;
+    pe->bad = true;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(pe->msg, pe->cap, fmt, ap);
+    va_end(ap);
+}
+
+/* The accepted names, for saying so in a rejection. */
+static void enum_list(const enum_name_t *tab, char *out, size_t cap)
+{
+    size_t w = 0;
+    out[0] = '\0';
+    for (int i = 0; tab[i].name && w + 24 < cap; i++) {
+        w += (size_t)snprintf(out + w, cap - w, "%s%s", i ? " " : "", tab[i].name);
+    }
+}
+
 static const char *enum_to_name(const enum_name_t *tab, int v)
 {
     for (int i = 0; tab[i].name; i++) if (tab[i].v == v) return tab[i].name;
@@ -106,19 +139,91 @@ static const char *enum_to_name(const enum_name_t *tab, int v)
 }
 
 /* Accepts a name or, for configs written by an earlier build, an integer. */
-static int name_to_enum(const cJSON *o, const char *key,
-                        const enum_name_t *tab, int def)
+/*
+ * An enum by name, and a rejection for anything else.
+ *
+ * Both of the ways this used to be lenient were silent: an unrecognised name
+ * fell back to the default, so "chartt" produced a working big-number tile
+ * and nothing said why; and a raw integer was honoured, so a config that
+ * meant percent (4) and typed duration (6) rendered a hit rate as
+ * milliseconds. Numbers are refused outright -- they are position-dependent
+ * and shift whenever the enum gains a member, and every config this firmware
+ * writes uses names.
+ */
+static int name_to_enum_ck(const cJSON *o, const char *key,
+                           const enum_name_t *tab, int def,
+                           parse_err_t *pe, const char *where)
 {
     const cJSON *v = cJSON_GetObjectItem(o, key);
+    if (v == NULL || cJSON_IsNull(v)) return def;
+
     if (cJSON_IsString(v) && v->valuestring) {
         for (int i = 0; tab[i].name; i++) {
             if (strcasecmp(tab[i].name, v->valuestring) == 0) return tab[i].v;
         }
+        char list[176];
+        enum_list(tab, list, sizeof(list));
+        perr(pe, "%s: \"%s\" is not a %s; expected one of: %s",
+             where, v->valuestring, key, list);
         return def;
     }
-    if (cJSON_IsNumber(v)) return (int)v->valuedouble;
+    if (cJSON_IsNumber(v)) {
+        char list[176];
+        enum_list(tab, list, sizeof(list));
+        perr(pe, "%s: %s must be a name, not a number; expected one of: %s",
+             where, key, list);
+        return def;
+    }
+    perr(pe, "%s: %s must be a string", where, key);
     return def;
 }
+
+/*
+ * Every field this parser reads, so a typo is refused rather than ignored.
+ *
+ * Ignoring unknown keys is what makes schema migration additive, and that is
+ * still true for keys this build has not heard of yet -- but in practice the
+ * unknown key is a misspelling of a known one, and silently dropping "colum"
+ * puts the tile at column zero with a cheerful 200 OK.
+ */
+static void check_keys(const cJSON *o, const char *const *known,
+                       parse_err_t *pe, const char *where)
+{
+    for (const cJSON *m = o ? o->child : NULL; m; m = m->next) {
+        if (m->string == NULL) continue;
+        bool ok = false;
+        for (int i = 0; known[i]; i++) {
+            if (strcmp(known[i], m->string) == 0) { ok = true; break; }
+        }
+        if (!ok) {
+            perr(pe, "%s: unknown field \"%s\"", where, m->string);
+            return;
+        }
+    }
+}
+
+static const char *const k_keys_root[] = {
+    "schema", "next_id", "active_layout", "id_hash",
+    "device", "endpoints", "screens", "panels", NULL,
+};
+static const char *const k_keys_device[] = {
+    "theme", "poll_default_s", "rotate_enabled", "rotate_dwell_s", NULL,
+};
+static const char *const k_keys_endpoint[] = {
+    "id", "name", "kind", "url", "poll_s", "timeout_ms",
+    "auth", "insecure_tls", "enabled", NULL,
+};
+static const char *const k_keys_screen[] = { "title", "pinned", NULL };
+static const char *const k_keys_panel[] = {
+    "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "terms",
+    "vmin", "vmax", "warn", "crit", "multi", "lower_is_worse",
+    "screen", "col", "row", "w", "h",
+    /* schema 1 spelled a panel's single term inline; still accepted */
+    "sel", "sel_b", "agg", "window_s", "q", NULL,
+};
+static const char *const k_keys_term[] = {
+    "sel", "reduce", "agg", "window_s", "q", NULL,
+};
 
 /* ------------------------------------------------------------- writing */
 
@@ -267,29 +372,49 @@ static esp_err_t write_config(const char *path)
     return ESP_OK;
 }
 
+/*
+ * One writer at a time, across tasks.
+ *
+ * Both writers stage through the same /config.new and rename it into place,
+ * so two at once means one of them renames a file the other still has open.
+ * LittleFS refuses it and the loser reports failure -- for a push, that was a
+ * 200 turning into "could not be saved" while the config had in fact been
+ * saved by the other writer a millisecond earlier.
+ *
+ * The flag stays as the "an async write is already pending" check; the mutex
+ * is what actually serialises the file operations.
+ */
+static volatile bool s_writing;
+static SemaphoreHandle_t s_write_mux;
+
 esp_err_t config_flush_sync(void)
 {
     if (!storage_cfg_ready()) return ESP_ERR_INVALID_STATE;
-
-    esp_err_t err = write_config(PATH_NEW);
-    if (err != ESP_OK) return err;
-
-    /* LittleFS rename is atomic over an existing file: a power cut yields
-     * either the whole old file or the whole new one, never a torn one. */
-    if (rename(PATH_NEW, PATH_CUR) != 0) {
-        ESP_LOGE(TAG, "rename failed; config not updated");
-        remove(PATH_NEW);
-        return ESP_FAIL;
+    if (s_write_mux && xSemaphoreTake(s_write_mux, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "a config write is stuck; not saving");
+        return ESP_ERR_TIMEOUT;
     }
 
-    s_dirty = false;
-    ESP_LOGI(TAG, "saved (%u endpoints, %u panels, %u screens)",
-             (unsigned)s_cfg.n_endpoints, (unsigned)s_cfg.n_panels,
-             (unsigned)s_cfg.n_screens);
-    return ESP_OK;
+    esp_err_t err = write_config(PATH_NEW);
+    if (err == ESP_OK) {
+        /* LittleFS rename is atomic over an existing file: a power cut yields
+         * either the whole old file or the whole new one, never a torn one. */
+        if (rename(PATH_NEW, PATH_CUR) != 0) {
+            ESP_LOGE(TAG, "rename failed; config not updated");
+            remove(PATH_NEW);
+            err = ESP_FAIL;
+        } else {
+            s_dirty = false;
+            ESP_LOGI(TAG, "saved (%u endpoints, %u panels, %u screens)",
+                     (unsigned)s_cfg.n_endpoints, (unsigned)s_cfg.n_panels,
+                     (unsigned)s_cfg.n_screens);
+        }
+    }
+
+    if (s_write_mux) xSemaphoreGive(s_write_mux);
+    return err;
 }
 
-static volatile bool s_writing;
 
 static void flush_task(void *arg)
 {
@@ -365,10 +490,20 @@ static float get_float(const cJSON *o, const char *k)
  * the live config: whatever it omits keeps its current value, and switching
  * layouts cannot silently drop the endpoint being polled.
  */
-static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full)
+static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full,
+                          parse_err_t *pe)
 {
     cJSON *root = cJSON_ParseWithLength(json, len);
-    if (root == NULL) return false;
+    if (root == NULL) {
+        perr(pe, "the body is not valid JSON");
+        return false;
+    }
+    if (!cJSON_IsObject(root)) {
+        perr(pe, "the document must be a JSON object");
+        cJSON_Delete(root);
+        return false;
+    }
+    check_keys(root, k_keys_root, pe, "document");
 
     if (full) {
         int schema = get_int(root, "schema", 0);
@@ -387,6 +522,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
 
     const cJSON *d = full ? cJSON_GetObjectItem(root, "device") : NULL;
     if (cJSON_IsObject(d)) {
+        check_keys(d, k_keys_device, pe, "device");
         get_str(d, "theme", cfg->device.theme, sizeof(cfg->device.theme));
         cfg->device.poll_default_s = (uint16_t)get_int(d, "poll_default_s", 10);
         cfg->device.rotate_enabled = get_bool(d, "rotate_enabled", false);
@@ -397,7 +533,12 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     const cJSON *it = NULL;
     if (cJSON_IsArray(arr)) {
         cJSON_ArrayForEach(it, arr) {
-            if (cfg->n_endpoints >= CFG_MAX_ENDPOINTS) break;
+            if (cfg->n_endpoints >= CFG_MAX_ENDPOINTS) {
+                perr(pe, "this build holds %d endpoints; the document has %d",
+                     CFG_MAX_ENDPOINTS, cJSON_GetArraySize(arr));
+                break;
+            }
+            check_keys(it, k_keys_endpoint, pe, "endpoint");
             cfg_endpoint_t *e = &cfg->endpoints[cfg->n_endpoints];
             memset(e, 0, sizeof(*e));
             e->id = (uint16_t)get_int(it, "id", cfg->next_id++);
@@ -419,7 +560,12 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) > 0) {
         cfg->n_screens = 0;
         cJSON_ArrayForEach(it, arr) {
-            if (cfg->n_screens >= CFG_MAX_SCREENS) break;
+            if (cfg->n_screens >= CFG_MAX_SCREENS) {
+                perr(pe, "this build holds %d screens; the document has %d",
+                     CFG_MAX_SCREENS, cJSON_GetArraySize(arr));
+                break;
+            }
+            check_keys(it, k_keys_screen, pe, "screen");
             cfg_screen_t *sc = &cfg->screens[cfg->n_screens++];
             memset(sc, 0, sizeof(*sc));
             get_str(it, "title", sc->title, sizeof(sc->title));
@@ -430,27 +576,47 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     arr = cJSON_GetObjectItem(root, "panels");
     if (cJSON_IsArray(arr)) {
         cJSON_ArrayForEach(it, arr) {
-            if (cfg->n_panels >= CFG_MAX_PANELS) break;
+            if (cfg->n_panels >= CFG_MAX_PANELS) {
+                /* Truncating is worse than refusing: the push is acknowledged
+                 * and the tiles past the limit simply never appear. */
+                perr(pe, "this build holds %d panels across all screens; "
+                         "the document has %d",
+                     CFG_MAX_PANELS, cJSON_GetArraySize(arr));
+                break;
+            }
+            check_keys(it, k_keys_panel, pe, "panel");
             cfg_panel_t *p = &cfg->panels[cfg->n_panels];
             memset(p, 0, sizeof(*p));
             p->id    = (uint16_t)get_int(it, "id", cfg->next_id++);
             p->ep_id = (uint16_t)get_int(it, "ep", 0);
             get_str(it, "sel", p->sel, sizeof(p->sel));
-            p->op = (panel_op_t)name_to_enum(it, "op", k_ops, OP_NONE);
             get_str(it, "title", p->title, sizeof(p->title));
             get_str(it, "unit", p->unit, sizeof(p->unit));
-            p->kind = (tile_kind_t)name_to_enum(it, "kind", k_kinds, TILE_STAT);
-            p->fmt  = (fmt_mode_t)name_to_enum(it, "fmt", k_fmts, FMT_AUTO);
+
+            /* Named in every message from here down, because "panel 3" means
+             * counting array entries and "Decode TPS" does not. */
+            char where[72];
+            if (p->title[0]) snprintf(where, sizeof(where), "panel \"%s\"", p->title);
+            else snprintf(where, sizeof(where), "panel %d", cfg->n_panels);
+
+            p->op   = (panel_op_t)name_to_enum_ck(it, "op", k_ops, OP_NONE, pe, where);
+            p->kind = (tile_kind_t)name_to_enum_ck(it, "kind", k_kinds, TILE_STAT, pe, where);
+            p->fmt  = (fmt_mode_t)name_to_enum_ck(it, "fmt", k_fmts, FMT_AUTO, pe, where);
 
             const cJSON *terms = cJSON_GetObjectItem(it, "terms"), *tit = NULL;
             if (cJSON_IsArray(terms) && cJSON_GetArraySize(terms) > 0) {
                 cJSON_ArrayForEach(tit, terms) {
-                    if (p->n_terms >= CFG_MAX_TERMS) break;
+                    if (p->n_terms >= CFG_MAX_TERMS) {
+                        perr(pe, "%s: a panel combines at most %d terms",
+                             where, CFG_MAX_TERMS);
+                        break;
+                    }
+                    check_keys(tit, k_keys_term, pe, where);
                     cfg_term_t *tm = &p->terms[p->n_terms];
                     memset(tm, 0, sizeof(*tm));
                     get_str(tit, "sel", tm->sel, sizeof(tm->sel));
-                    tm->reduce = (uint8_t)name_to_enum(tit, "reduce", k_reduces, RED_SUM);
-                    tm->agg    = (uint8_t)name_to_enum(tit, "agg", k_aggs, AGG_LAST);
+                    tm->reduce = (uint8_t)name_to_enum_ck(tit, "reduce", k_reduces, RED_SUM, pe, where);
+                    tm->agg    = (uint8_t)name_to_enum_ck(tit, "agg", k_aggs, AGG_LAST, pe, where);
                     tm->window_s = (uint16_t)get_int(tit, "window_s", 0);
                     float tq     = get_float(tit, "q");
                     tm->q        = isnan(tq) ? 0.0f : tq;
@@ -466,7 +632,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
                 memset(a, 0, sizeof(*a));
                 get_str(it, "sel", a->sel, sizeof(a->sel));
                 a->reduce   = RED_FIRST;   /* what schema 1 actually did */
-                a->agg      = (uint8_t)name_to_enum(it, "agg", k_aggs, AGG_LAST);
+                a->agg      = (uint8_t)name_to_enum_ck(it, "agg", k_aggs, AGG_LAST, pe, where);
                 a->window_s = (uint16_t)get_int(it, "window_s", 0);
                 float q     = get_float(it, "q");
                 a->q        = isnan(q) ? 0.0f : q;
@@ -486,7 +652,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             p->warn = get_float(it, "warn");
             p->crit = get_float(it, "crit");
             p->multi          = get_bool(it, "multi", false);
-            p->scale = (int8_t)name_to_enum(it, "scale", k_scales, FMT_PIN_AUTO);
+            p->scale = (int8_t)name_to_enum_ck(it, "scale", k_scales, FMT_PIN_AUTO, pe, where);
             p->lower_is_worse = get_bool(it, "lower_is_worse", false);
             p->screen = (uint8_t)get_int(it, "screen", 0);
             p->col = (uint8_t)get_int(it, "col", 0);
@@ -501,17 +667,19 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     }
 
     cJSON_Delete(root);
-    return true;
+    return pe == NULL || !pe->bad;
 }
 
-static bool parse_into(config_t *cfg, const char *json, size_t len)
+static bool parse_into(config_t *cfg, const char *json, size_t len,
+                       parse_err_t *pe)
 {
-    return parse_into_ex(cfg, json, len, true);
+    return parse_into_ex(cfg, json, len, true, pe);
 }
 
-static bool parse_into_partial(config_t *cfg, const char *json, size_t len)
+static bool parse_into_partial(config_t *cfg, const char *json, size_t len,
+                               parse_err_t *pe)
 {
-    return parse_into_ex(cfg, json, len, false);
+    return parse_into_ex(cfg, json, len, false, pe);
 }
 
 static bool load_file(const char *path)
@@ -530,9 +698,12 @@ static bool load_file(const char *path)
     fclose(f);
     buf[rd] = '\0';
 
-    bool ok = parse_into(&s_cfg, buf, rd);
+    char why[CFG_ERR_MAX] = "";
+    parse_err_t pe = { why, sizeof(why), false };
+    bool ok = parse_into(&s_cfg, buf, rd, &pe);
     free(buf);
     if (ok) ESP_LOGI(TAG, "loaded %s (%u bytes)", path, (unsigned)rd);
+    else    ESP_LOGW(TAG, "%s rejected: %s", path, why[0] ? why : "unparseable");
     return ok;
 }
 
@@ -540,6 +711,8 @@ esp_err_t config_load(void)
 {
     set_defaults();
     s_was_reset = false;
+
+    if (s_write_mux == NULL) s_write_mux = xSemaphoreCreateMutex();
 
     /* The flush timer lives in the LVGL task, which is where every config
      * change originates. */
@@ -601,6 +774,12 @@ void config_mark_good_boot(void)
  * one. Rejecting with a reason beats accepting something that renders as an
  * empty screen and leaves the user guessing.
  */
+static void panel_where(const cfg_panel_t *p, int i, char *out, size_t cap)
+{
+    if (p->title[0]) snprintf(out, cap, "panel \"%s\"", p->title);
+    else             snprintf(out, cap, "panel %d (id %u)", i, (unsigned)p->id);
+}
+
 static bool validate(const config_t *c, char *err, size_t cap)
 {
     if (c->schema < 1 || c->schema > CFG_SCHEMA_VERSION) {
@@ -612,27 +791,110 @@ static bool validate(const config_t *c, char *err, size_t cap)
         snprintf(err, cap, "at least one screen is required");
         return false;
     }
+
     for (int i = 0; i < c->n_panels; i++) {
         const cfg_panel_t *p = &c->panels[i];
+        char w_[80];
+        panel_where(p, i, w_, sizeof(w_));
+
         if (p->n_terms == 0 || p->terms[0].sel[0] == '\0') {
-            snprintf(err, cap, "panel %d has no terms", i);
+            snprintf(err, cap, "%s has no terms", w_);
             return false;
         }
+
+        /*
+         * Every selector has to parse HERE.
+         *
+         * The poller parses them too, and drops the panel when one does not --
+         * on a worker task, after the push has been acknowledged, so the tile
+         * simply never shows data and nothing ever says why.
+         */
+        for (int k = 0; k < p->n_terms; k++) {
+            char scratch[CFG_SEL_MAX];
+            const char *name; uint16_t name_len;
+            prom_label_t labels[8]; uint8_t n_labels;
+            strncpy(scratch, p->terms[k].sel, sizeof(scratch) - 1);
+            scratch[sizeof(scratch) - 1] = '\0';
+            if (!prom_parse_selector(scratch, scratch, sizeof(scratch),
+                                     &name, &name_len, labels, 8, &n_labels)) {
+                snprintf(err, cap, "%s term %d: cannot parse the selector "
+                                   "\"%s\"; expected metric or "
+                                   "metric{label=\"value\"}",
+                         w_, k, p->terms[k].sel);
+                return false;
+            }
+            if (p->terms[k].q < 0.0f || p->terms[k].q > 1.0f) {
+                snprintf(err, cap, "%s term %d: q is %.3f; a quantile is 0 to 1",
+                         w_, k, (double)p->terms[k].q);
+                return false;
+            }
+        }
+
         uint8_t w = p->w ? p->w : 1, h = p->h ? p->h : 1;
         if (p->col + w > GRID_COLS || p->row + h > GRID_ROWS) {
             snprintf(err, cap,
-                     "panel %d at %ux%u spans past the %dx%d grid",
-                     i, p->col, p->row, GRID_COLS, GRID_ROWS);
+                     "%s: a %ux%u tile at col %u row %u runs past the %dx%d grid",
+                     w_, w, h, p->col, p->row, GRID_COLS, GRID_ROWS);
             return false;
         }
+
+        /* The schema documents the minimum spans; without this it documented
+         * a refusal that never happened and the widget quietly changed. */
+        const tile_vt_t *vt = tile_vt(p->kind);
+        if (vt && (w < vt->min_w || h < vt->min_h)) {
+            snprintf(err, cap, "%s: %s needs at least %ux%u, not %ux%u",
+                     w_, vt->name, vt->min_w, vt->min_h, w, h);
+            return false;
+        }
+
         if (p->screen >= c->n_screens) {
-            snprintf(err, cap, "panel %d names screen %u, only %u exist",
-                     i, p->screen, c->n_screens);
+            snprintf(err, cap, "%s names screen %u, and only %u exist",
+                     w_, p->screen, c->n_screens);
             return false;
         }
         if (p->op != OP_NONE && p->n_terms < 2) {
-            snprintf(err, cap, "panel %d has an operator but one term", i);
+            snprintf(err, cap, "%s has an operator but one term", w_);
             return false;
+        }
+        if (!isnan(p->vmin) && !isnan(p->vmax) && p->vmin >= p->vmax) {
+            snprintf(err, cap, "%s: vmin %g is not below vmax %g",
+                     w_, (double)p->vmin, (double)p->vmax);
+            return false;
+        }
+        if (c->n_endpoints > 0 && p->ep_id != 0) {
+            bool found = false;
+            for (int e = 0; e < c->n_endpoints; e++) {
+                if (c->endpoints[e].id == p->ep_id) { found = true; break; }
+            }
+            if (!found) {
+                snprintf(err, cap, "%s names endpoint %u, which does not exist",
+                         w_, (unsigned)p->ep_id);
+                return false;
+            }
+        }
+
+        for (int j = 0; j < i; j++) {
+            const cfg_panel_t *o = &c->panels[j];
+            if (o->id == p->id) {
+                snprintf(err, cap, "%s: id %u is used twice", w_, (unsigned)p->id);
+                return false;
+            }
+            /*
+             * Overlap, which the touch UI cannot produce but a push can. Two
+             * tiles in one cell draw on top of each other, and which one wins
+             * depends on the order they were built in.
+             */
+            if (o->screen != p->screen) continue;
+            uint8_t ow = o->w ? o->w : 1, oh = o->h ? o->h : 1;
+            bool hit = !(p->col + w <= o->col || o->col + ow <= p->col ||
+                         p->row + h <= o->row || o->row + oh <= p->row);
+            if (hit) {
+                char o_[80];
+                panel_where(o, j, o_, sizeof(o_));
+                snprintf(err, cap, "%s overlaps %s on screen %u",
+                         w_, o_, p->screen);
+                return false;
+            }
         }
     }
     return true;
@@ -649,8 +911,9 @@ esp_err_t config_apply_json(const char *json, size_t len, char *err, size_t cap)
         return ESP_ERR_NO_MEM;
     }
 
-    if (!parse_into(tmp, json, len)) {
-        snprintf(err, cap, "could not parse the document as JSON");
+    parse_err_t pe = { err, cap, false };
+    if (!parse_into(tmp, json, len, &pe)) {
+        if (!pe.bad) snprintf(err, cap, "could not parse the document");
         free(tmp);
         return ESP_ERR_INVALID_ARG;
     }
@@ -663,8 +926,13 @@ esp_err_t config_apply_json(const char *json, size_t len, char *err, size_t cap)
     s_cfg = *tmp;
     free(tmp);
 
+    /*
+     * Marked dirty, not flushed. The caller decides how durable the write has
+     * to be -- the HTTP handlers write synchronously so a 200 means it
+     * landed -- and firing the debounced writer here as well put two writers
+     * on the same staging file.
+     */
     config_touch();
-    config_flush();
     return ESP_OK;
 }
 
@@ -866,7 +1134,7 @@ esp_err_t config_layout_load(const char *name)
     fclose(f);
     buf[rd] = '\0';
 
-    char err[96] = "";
+    char err[CFG_ERR_MAX] = "";
     esp_err_t rc = config_layout_apply_json(buf, rd, err, sizeof(err));
     free(buf);
     if (rc != ESP_OK) {
@@ -898,8 +1166,9 @@ esp_err_t config_layout_apply_json(const char *json, size_t len,
     tmp->n_screens = 0;
     tmp->n_panels  = 0;
 
-    if (!parse_into_partial(tmp, json, len)) {
-        snprintf(err, cap, "could not parse the layout as JSON");
+    parse_err_t pe = { err, cap, false };
+    if (!parse_into_partial(tmp, json, len, &pe)) {
+        if (!pe.bad) snprintf(err, cap, "could not parse the layout");
         free(tmp);
         return ESP_ERR_INVALID_ARG;
     }

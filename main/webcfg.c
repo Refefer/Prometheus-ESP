@@ -187,7 +187,10 @@ static esp_err_t post_config(httpd_req_t *req)
      * that half-applies would leave the panel in a state that matches neither
      * the old config nor the new one, which is worse than rejecting it.
      */
-    char err[96] = "";
+    /* Roomy on purpose: a rejection quotes the offending selector or lists
+     * every accepted enum name, and a truncated reason is a reason you have
+     * to guess at. */
+    char err[CFG_ERR_MAX] = "";
     esp_err_t rc = config_apply_json(body, (size_t)got, err, sizeof(err));
     heap_caps_free(body);
 
@@ -195,10 +198,10 @@ static esp_err_t post_config(httpd_req_t *req)
         ESP_LOGW(TAG, "rejected a pushed config: %s", err);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
-        char eerr[224];
+        char eerr[CFG_ERR_MAX * 2];
         json_escape(err[0] ? err : "could not parse the configuration",
                     eerr, sizeof(eerr));
-        char out[256];
+        char out[CFG_ERR_MAX * 2 + 32];
         snprintf(out, sizeof(out), "{\"error\":\"%s\"}\n", eerr);
         httpd_resp_sendstr(req, out);
         return ESP_OK;
@@ -358,14 +361,18 @@ static esp_err_t layouts_post(httpd_req_t *req)
     }
     body[got] = '\0';
 
-    char err[96] = "";
+    char err[CFG_ERR_MAX] = "";
     esp_err_t rc = config_layout_apply_json(body, (size_t)got, err, sizeof(err));
     heap_caps_free(body);
     if (rc != ESP_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
-        char out[176];
-        snprintf(out, sizeof(out), "{\"error\":\"%s\"}\n",
-                 err[0] ? err : "could not apply the layout");
+        /* Escaped, like every other reason: these quote selectors and titles,
+         * which are full of the one character that would break the reply. */
+        char eerr[CFG_ERR_MAX * 2];
+        json_escape(err[0] ? err : "could not apply the layout",
+                    eerr, sizeof(eerr));
+        char out[CFG_ERR_MAX * 2 + 32];
+        snprintf(out, sizeof(out), "{\"error\":\"%s\"}\n", eerr);
         httpd_resp_sendstr(req, out);
         return ESP_OK;
     }
