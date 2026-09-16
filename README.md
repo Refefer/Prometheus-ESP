@@ -189,7 +189,7 @@ serves the same JSON that lives on its flash:
 
 ```sh
 TOK=...                      # shown on the device: gear -> Config push
-D=192.168.1.50
+D=192.168.1.50               # the address in the panel's header
 
 curl -H "X-Auth: $TOK" http://$D/config > panel.json
 $EDITOR panel.json
