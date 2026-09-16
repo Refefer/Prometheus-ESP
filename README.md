@@ -163,6 +163,11 @@ Switching rebuilds the whole widget tree rather than restyling it in place:
 every colour is read at build time, so a palette works everywhere by
 construction and no renderer has a restyle hook to keep in step.
 
+Switching keeps what is on screen: chart history is carried across the
+rebuild, keyed by panel id and data fingerprint, and the tiles repaint from
+the snapshot already in hand rather than waiting for the next scrape. The same
+carry covers a change of widget kind, which the adopt path cannot handle.
+
 `panel.ramp` colours a gauge or bar by where the value sits in its range:
 `heat` runs ok to crit as it rises, `cool` reverses that for things where low
 is the problem, `series` steps through the categorical palette, and `none`

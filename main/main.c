@@ -128,6 +128,7 @@ static void run_parser_smoke(char *out, size_t cap)
 
 
 static void rebuild_dashboard(void);   /* defined with the dashboard below */
+static void dashboard_tick(lv_timer_t *timer);
 static void set_hdr_title(void);
 static void browser_closed(void);      /* rebuilds tiles after any modal */
 static void hole_tapped(lv_event_t *e);
@@ -232,6 +233,61 @@ static int screens_navigable(void)
 }
 
 /*
+ * Chart history, kept across a rebuild.
+ *
+ * A tile owns its history, so destroying one throws it away -- and a theme
+ * change has to destroy every tile, because colours are read at build time.
+ * Without this, picking a palette blanks every chart on the device and they
+ * refill over the next ten minutes, which is the same mistake as resetting a
+ * counter baseline because some unrelated panel was edited.
+ *
+ * Keyed by panel id AND by the data fingerprint, so history follows a tile
+ * that merely changed how it looks -- including a change of widget kind,
+ * which the adopt path cannot handle -- and is dropped when the tile now
+ * shows a different series.
+ */
+typedef struct {
+    uint16_t panel_id;
+    uint32_t data_fp;
+    uint16_t n;
+    bool     used;
+    float    v[TILE_HIST_MAX];
+} hist_keep_t;
+static hist_keep_t s_keep[CFG_MAX_PANELS];
+
+static void hist_stash(const tile_inst_t *t, const tile_spec_t *sp)
+{
+    if (t == NULL || t->hist_n == 0) return;
+    hist_keep_t *slot = NULL;
+    for (int i = 0; i < CFG_MAX_PANELS; i++) {
+        if (s_keep[i].used && s_keep[i].panel_id == sp->panel_id) { slot = &s_keep[i]; break; }
+        if (!s_keep[i].used && slot == NULL) slot = &s_keep[i];
+    }
+    if (slot == NULL) slot = &s_keep[0];      /* full: the oldest loses */
+    slot->used     = true;
+    slot->panel_id = sp->panel_id;
+    slot->data_fp  = sp->data_fp;
+    slot->n        = t->hist_n;
+    memcpy(slot->v, t->hist, sizeof(float) * t->hist_n);
+}
+
+static int s_hist_kept;   /* restored on the last rebuild, for the log line */
+
+static void hist_apply(tile_inst_t *t, const tile_spec_t *sp)
+{
+    if (t == NULL) return;
+    for (int i = 0; i < CFG_MAX_PANELS; i++) {
+        if (!s_keep[i].used) continue;
+        if (s_keep[i].panel_id != sp->panel_id) continue;
+        if (s_keep[i].data_fp != sp->data_fp) return;   /* different series now */
+        t->hist_n = s_keep[i].n;
+        memcpy(t->hist, s_keep[i].v, sizeof(float) * s_keep[i].n);
+        s_hist_kept++;
+        return;
+    }
+}
+
+/*
  * Page dots.
  *
  * Rebuilt rather than restyled because the count changes: filling the last
@@ -333,7 +389,11 @@ static void build_tiles(lv_obj_t *scr)
     for (int j = 0; j < had_n; j++) {
         bool claimed = false;
         for (int k = 0; k < want_n; k++) if (adopt[k] == j) { claimed = true; break; }
-        if (!claimed && keep[j]) { tile_destroy(keep[j]); keep[j] = NULL; }
+        if (!claimed && keep[j]) {
+            hist_stash(keep[j], &had[j]);
+            tile_destroy(keep[j]);
+            keep[j] = NULL;
+        }
     }
 
     memcpy(s_specs, want, sizeof(want));
@@ -344,6 +404,7 @@ static void build_tiles(lv_obj_t *scr)
             tile_adopt(s_tiles[k], &s_specs[k]);
         } else {
             s_tiles[k] = tile_create(scr, &s_specs[k]);
+            hist_apply(s_tiles[k], &s_specs[k]);
         }
         tile_set_visible(s_tiles[k], s_specs[k].screen == s_screen);
     }
@@ -611,9 +672,19 @@ void ui_restyle(void)
 {
     if (modal_open()) return;          /* a sheet owns the screen; it rebuilds on close */
 
+    /* It ends by repainting through dashboard_tick, which can itself decide a
+     * restyle is due; one guard is cheaper than reasoning about that. */
+    static bool busy;
+    if (busy) return;
+    busy = true;
+
     lv_obj_t *scr = lv_scr_act();
     for (int i = 0; i < s_tile_n; i++) {
-        if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
+        if (s_tiles[i]) {
+            hist_stash(s_tiles[i], &s_specs[i]);
+            tile_destroy(s_tiles[i]);
+            s_tiles[i] = NULL;
+        }
     }
     s_tile_n = 0;
     s_hole_n = 0;
@@ -625,20 +696,43 @@ void ui_restyle(void)
     s_fbar = s_hdr_title = s_hdr_status = NULL;
     s_ftr_left = s_ftr_right = s_empty = NULL;
 
+    s_hist_kept = 0;
     build_dashboard();
+    ESP_LOGI(TAG, "theme %s applied: %d tiles, %d kept their history",
+             app_theme_name(app_theme_id()), s_tile_n, s_hist_kept);
+
+    /*
+     * Repaint from the snapshot already in hand rather than waiting for the
+     * next scrape: a palette change should not leave every tile reading "--"
+     * for a poll interval.
+     */
     s_seen_gen = UINT32_MAX;
+    dashboard_tick(NULL);
+    busy = false;
+}
+
+/*
+ * Adopt the configured palette, if it is not the one already showing.
+ *
+ * One definition with one order: the modal check comes BEFORE the theme is
+ * set, because setting it first and then finding the screen busy would leave
+ * the id updated and the tree unrebuilt -- and the "has it changed" test
+ * would then answer no forever, so the new palette would never be drawn.
+ * A sheet rebuilds on close, which is where this gets called again.
+ */
+static bool apply_theme_if_changed(void)
+{
+    theme_id_t want = app_theme_from_name(config_get()->device.theme);
+    if (want == app_theme_id()) return false;
+    if (modal_open()) return false;
+    app_theme_set(want);
+    ui_restyle();
+    return true;
 }
 
 static void rebuild_dashboard(void)
 {
-    /* A settings sheet can have changed the palette; applying it is a whole
-     * rebuild, so it happens here on close rather than under the sheet. */
-    theme_id_t want = app_theme_from_name(config_get()->device.theme);
-    if (want != app_theme_id()) {
-        app_theme_set(want);
-        ui_restyle();
-        return;
-    }
+    if (apply_theme_if_changed()) return;
     set_hdr_title();
 }
 
@@ -670,6 +764,11 @@ static void dashboard_tick(lv_timer_t *timer)
     uint32_t cfg_gen = config_generation();
     if (cfg_gen != seen_cfg) {
         seen_cfg = cfg_gen;
+
+        /* A pushed config can change the palette too, and that is a rebuild
+         * rather than a repaint. */
+        if (apply_theme_if_changed()) return;
+
         build_tiles(lv_scr_act());
         s_seen_gen = UINT32_MAX;
         set_hdr_title();
