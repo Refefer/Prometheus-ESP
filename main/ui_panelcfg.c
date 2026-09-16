@@ -20,7 +20,6 @@ static lv_obj_t *s_multi_lbl, *s_sel_lbl, *s_title_lbl;
 static lv_obj_t *s_op_btn[5], *s_selb_lbl;
 static lv_obj_t *s_op_cap, *s_selb_cap, *s_selb_btn;
 static lv_obj_t *s_q_btn[3], *s_win_btn[4], *s_q_cap, *s_win_cap;
-static lv_obj_t *s_pos_lbl;
 static lv_obj_t *s_scr_lbl;
 
 static int screens_reachable(void);
@@ -165,8 +164,6 @@ static void refresh(void)
     text_color_if_changed(s_selb_lbl,
                           (p->op != OP_NONE && !have_b) ? COL_WARN : COL_TEXT);
 
-    label_set_fmt_if_changed(s_pos_lbl, "col %u  row %u   %ux%u",
-                             p->col, p->row, p->w ? p->w : 1, p->h ? p->h : 1);
     label_set_fmt_if_changed(s_scr_lbl, "%u / %d", p->screen + 1,
                              screens_reachable());
 
@@ -623,9 +620,6 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
         lv_obj_set_size(b, 72, BTN_H);
         lv_obj_align(b, LV_ALIGN_BOTTOM_LEFT, GRID_MX + i * 78, -12);
     }
-
-    s_pos_lbl = make_label(s_root, FONT_S, COL_DIM);
-    lv_obj_align(s_pos_lbl, LV_ALIGN_BOTTOM_LEFT, GRID_MX, -40);
 
     lv_obj_t *maphint = make_label(s_root, FONT_XS, COL_DIM);
     lv_label_set_text(maphint, "tap a cell to place it");
