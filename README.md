@@ -157,11 +157,13 @@ visibility change. Swipe to a page and its charts are already drawn.
 
 ### The top bar
 
-Endpoint and layout on the left, then Wi-Fi strength as four bars, then the
-time and date. Bars rather than a single glyph: height says how much signal,
+Wi-Fi strength hard left, then endpoint and layout, then the time and date
+centred on the screen. Signal reads first because it is the one thing that
+explains everything else being wrong. Bars rather than a single glyph: height says how much signal,
 colour says whether it is a problem, and either alone is readable across a
-room. The IP address moved to the settings sheet -- it is something you need
-once, while setting the device up, which is where that is done.
+room. Wi-Fi setup and the IP address are in the settings sheet -- both are things
+you touch once, while setting the device up, and that is where setting up
+happens.
 
 The clock is SNTP, and `device.tz` is a POSIX TZ string (`EST5EDT,M3.2.0,M11.1.0`,
 `GMT0BST,M3.5.0/1,M10.5.0`). Note the sign convention is inverted from UTC

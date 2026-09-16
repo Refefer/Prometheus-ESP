@@ -134,12 +134,6 @@ static void set_hdr_title(void);
 static void browser_closed(void);      /* rebuilds tiles after any modal */
 static void hole_tapped(lv_event_t *e);
 
-static void reopen_setup_cb(lv_event_t *e)
-{
-    (void)e;
-    ui_setup_open(browser_closed);
-}
-
 static void endpoints_cb(lv_event_t *e)
 {
     (void)e;
@@ -614,35 +608,41 @@ static void build_dashboard(void)
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_pad_all(scr, 0, 0);
 
+    /*
+     * Signal first, hard left. It is the one thing that explains everything
+     * else being wrong, so it reads before the title rather than after it.
+     */
+    s_hdr_sig = make_signal(scr);
+    lv_obj_set_pos(s_hdr_sig, GRID_MX, 11);
+
     s_hdr_title = make_label(scr, FONT_L, COL_TEXT);
-    lv_obj_set_pos(s_hdr_title, GRID_MX, 8);
+    lv_obj_set_pos(s_hdr_title, GRID_MX + 37, 8);
     /* Bounded and elided rather than left to grow: an endpoint and a layout
-     * name concatenated can run under the status readout. */
-    lv_obj_set_width(s_hdr_title, 270);
+     * name concatenated would otherwise run into the clock. */
+    lv_obj_set_width(s_hdr_title, 268);
     lv_label_set_long_mode(s_hdr_title, LV_LABEL_LONG_DOT);
     set_hdr_title();
 
     /*
-     * Signal strength and the time, where the IP address used to be. An IP is
-     * something you need once, when setting the device up, and it is in the
-     * settings sheet; the clock and the link are what you glance at.
+     * The clock, centred on the screen rather than on whatever width the
+     * time happens to render at: a digit changing every minute must not
+     * shuffle the block sideways.
      */
-    s_hdr_sig = make_signal(scr);
-    lv_obj_set_pos(s_hdr_sig, 296, 11);
-
+    const lv_coord_t clock_w = 140;
     s_hdr_time = make_label(scr, FONT_L, COL_TEXT);
-    lv_obj_set_pos(s_hdr_time, 336, 1);
+    lv_obj_set_width(s_hdr_time, clock_w);
+    lv_obj_set_style_text_align(s_hdr_time, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_hdr_time, SCR_W / 2 - clock_w / 2, 1);
 
     s_hdr_date = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_hdr_date, 336, 24);
+    lv_obj_set_width(s_hdr_date, clock_w);
+    lv_obj_set_style_text_align(s_hdr_date, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_hdr_date, SCR_W / 2 - clock_w / 2, 23);
 
-    lv_obj_t *wifi = make_btn(scr, LV_SYMBOL_WIFI, reopen_setup_cb, NULL);
-    lv_obj_set_size(wifi, 52, 30);
-    lv_obj_set_pos(wifi, SCR_W - 168 - GRID_MX, 4);
-
+    /* Wi-Fi setup lives in the gear sheet now; it is a thing you do once. */
     lv_obj_t *lay = make_btn(scr, LV_SYMBOL_COPY, layouts_cb, NULL);
     lv_obj_set_size(lay, 52, 30);
-    lv_obj_set_pos(lay, SCR_W - 226 - GRID_MX, 4);
+    lv_obj_set_pos(lay, SCR_W - 168 - GRID_MX, 4);
 
     lv_obj_t *list = make_btn(scr, LV_SYMBOL_LIST, browse_cb, NULL);
     lv_obj_set_size(list, 52, 30);
