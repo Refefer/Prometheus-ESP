@@ -165,6 +165,10 @@ static void stat_build(tile_inst_t *t, lv_obj_t *body)
      * over-wide value ellipses, which reads as "too big to show here"; left
      * unbounded it is clipped mid-digit, which reads as a smaller number.
      * The ellipsis is three periods, which the digits-only face does have.
+     *
+     * Only this tile can do it: its unit label sits underneath at a fixed
+     * position, where the chart and sparkline hang theirs off the right edge
+     * of the number itself.
      */
     lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
     lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
@@ -205,10 +209,13 @@ static void spark_build(tile_inst_t *t, lv_obj_t *body)
     lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
 
     p->val = make_label(body, num_font(t, true), COL_TEXT);
-    /* Bounded for the same reason as the big number above: a pinned prefix
-     * can be handed a value far wider than the tile. */
-    lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
-    lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
+    /*
+     * Left to size itself. The suffix is aligned to this label's right edge
+     * (see the update below), so giving it a fixed width parks the unit
+     * outside the tile and it vanishes -- which is exactly what a width bound
+     * here did. The big-number tile can bound its value because its suffix
+     * sits underneath at a fixed position; these cannot.
+     */
     p->suf = make_label(body, FONT_M, COL_DIM);
     make_chart(t, body, p, 60, false);
 
@@ -293,10 +300,13 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
     lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
 
     p->val = make_label(body, FONT_NUM_L, COL_TEXT);
-    /* Bounded for the same reason as the big number above: a pinned prefix
-     * can be handed a value far wider than the tile. */
-    lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
-    lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
+    /*
+     * Left to size itself. The suffix is aligned to this label's right edge
+     * (see the update below), so giving it a fixed width parks the unit
+     * outside the tile and it vanishes -- which is exactly what a width bound
+     * here did. The big-number tile can bound its value because its suffix
+     * sits underneath at a fixed position; these cannot.
+     */
     lv_obj_set_pos(p->val, 0, 0);
     p->suf = make_label(body, FONT_M, COL_DIM);
 
