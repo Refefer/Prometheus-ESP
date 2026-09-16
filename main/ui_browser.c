@@ -637,7 +637,9 @@ static void render_rows(void)
                              : (fmt == FMT_RATE_IEC) ? FMT_IEC
                              : (fmt == FMT_PCT_01 && agg == AGG_RATE) ? FMT_SI
                              : fmt,
-                        unit, buf, sizeof(buf));
+                        /* Nothing is pinned yet: this is a preview of a
+                         * metric that is not a panel. */
+                        unit, FMT_PIN_AUTO, buf, sizeof(buf));
             label_set_if_changed(s_row_val[r], buf);
         } else {
             label_set_if_changed(s_row_val[r], "");

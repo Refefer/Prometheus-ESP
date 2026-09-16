@@ -620,14 +620,15 @@ static esp_err_t get_schema(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    char ek[160], ef[200], er[100], ea[80], eo[80];
+    char ek[160], ef[200], er[100], ea[80], eo[80], es[120];
     config_enum_values("kind",   ek, sizeof(ek));
     config_enum_values("fmt",    ef, sizeof(ef));
     config_enum_values("reduce", er, sizeof(er));
     config_enum_values("agg",    ea, sizeof(ea));
     config_enum_values("op",     eo, sizeof(eo));
+    config_enum_values("scale",  es, sizeof(es));
 
-    char buf[1280];
+    char buf[1420];
     snprintf(buf, sizeof(buf),
 "{\n"
 "  \"schema\": %u,\n"
@@ -636,6 +637,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "  \"model\": \"A panel draws one number. It has TERMS; each term selects a set of series and reduces that set to a scalar, and an op combines the terms.\",\n"
 "  \"enums\": {\n"
 "    \"kind\":   [%s],\n"
+"    \"scale\":  [%s],\n"
 "    \"fmt\":    [%s],\n"
 "    \"reduce\": [%s],\n"
 "    \"agg\":    [%s],\n"
@@ -643,7 +645,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "  },\n",
         (unsigned)CFG_SCHEMA_VERSION, GRID_COLS, GRID_ROWS,
         CFG_MAX_PANELS, CFG_MAX_TERMS, CFG_MAX_SCREENS,
-        ek, ef, er, ea, eo);
+        ek, es, ef, er, ea, eo);
     httpd_resp_send_chunk(req, buf, HTTPD_RESP_USE_STRLEN);
 
     httpd_resp_sendstr_chunk(req,
@@ -656,6 +658,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"panel.vmin/vmax\":\"gauge and bar range; null means auto\",\n"
 "    \"panel.warn/crit\":\"threshold colouring; null means none\",\n"
 "    \"panel.multi\":    \"show every matching series as ranked rows instead of one number\",\n"
+"    \"panel.scale\":    \"pins the SI/IEC prefix so the unit stops moving as the value does; auto keeps three significant digits instead. The names are the SI ladder and map by position on a byte panel: k is KiB, M is MiB. Ignored by formats with no ladder (percent, duration, bool).\",\n"
 "    \"term.sel\":       \"metric{label=\\\"value\\\"}; a label value may contain * as a glob\",\n"
 "    \"term.reduce\":    \"collapses the matched set to a scalar; this is the sum by() of this format\",\n"
 "    \"term.agg\":       \"last takes the value; rate differences it over window_s\",\n"

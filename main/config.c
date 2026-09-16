@@ -65,6 +65,19 @@ static const enum_name_t k_kinds[] = {
     { TILE_BAR, "bar" }, { TILE_GAUGE, "gauge" }, { TILE_STATUS, "status" },
     { TILE_HIST, "histogram" }, { TILE_MULTI, "multi" }, { 0, NULL },
 };
+/*
+ * Prefix pins. The number is the ladder exponent and means the same in both
+ * ladders -- 1 is k on an SI panel and Ki on a byte count -- so one table
+ * serves both. "1" is the empty prefix, spelled as a multiplier because an
+ * empty string is invisible in a config file.
+ */
+static const enum_name_t k_scales[] = {
+    { FMT_PIN_AUTO, "auto" },
+    { 0, "1" }, { 1, "k" }, { 2, "M" }, { 3, "G" }, { 4, "T" }, { 5, "P" },
+    { -1, "m" }, { -2, "u" }, { -3, "n" }, { -4, "p" },
+    { 0, NULL },
+};
+
 static const enum_name_t k_fmts[] = {
     { FMT_AUTO, "auto" }, { FMT_RAW, "raw" }, { FMT_SI, "si" },
     { FMT_IEC, "bytes" }, { FMT_PCT_01, "percent" },
@@ -192,6 +205,7 @@ static void write_presentation(FILE *f)
         fputs(", \"warn\": ", f); write_float(f, p->warn);
         fputs(", \"crit\": ", f); write_float(f, p->crit);
         fprintf(f, ", \"multi\": %s", p->multi ? "true" : "false");
+        fputs(", \"scale\": ", f); write_escaped(f, enum_to_name(k_scales, p->scale));
         fprintf(f, ", \"lower_is_worse\": %s, \"screen\": %u,"
                    " \"col\": %u, \"row\": %u, \"w\": %u, \"h\": %u }%s\n",
                 p->lower_is_worse ? "true" : "false",
@@ -472,6 +486,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             p->warn = get_float(it, "warn");
             p->crit = get_float(it, "crit");
             p->multi          = get_bool(it, "multi", false);
+            p->scale = (int8_t)name_to_enum(it, "scale", k_scales, FMT_PIN_AUTO);
             p->lower_is_worse = get_bool(it, "lower_is_worse", false);
             p->screen = (uint8_t)get_int(it, "screen", 0);
             p->col = (uint8_t)get_int(it, "col", 0);
@@ -662,7 +677,8 @@ void config_enum_values(const char *which, char *out, size_t cap)
         strcmp(which, "fmt")    == 0 ? k_fmts    :
         strcmp(which, "reduce") == 0 ? k_reduces :
         strcmp(which, "agg")    == 0 ? k_aggs    :
-        strcmp(which, "op")     == 0 ? k_ops     : NULL;
+        strcmp(which, "op")     == 0 ? k_ops     :
+        strcmp(which, "scale")  == 0 ? k_scales  : NULL;
     if (tab == NULL) return;
 
     size_t w = 0;
@@ -921,6 +937,9 @@ cfg_panel_t *config_panel_add(void)
     p->id   = s_cfg.next_id++;
     p->kind = TILE_STAT;
     p->fmt  = FMT_AUTO;
+    /* Zero is a legal pin -- it means "no prefix" -- so auto has to be set
+     * explicitly rather than inherited from the memset above. */
+    p->scale = FMT_PIN_AUTO;
     p->vmin = p->vmax = p->warn = p->crit = NAN;
     p->w = p->h = 1;
     return p;

@@ -69,10 +69,20 @@ static int decimals_tracked(double shown, fmt_state_t *st)
  * Returns the index; *scaled receives the value divided by that prefix.
  */
 static int pick_exp(double v, double base, int lo, int hi,
-                    fmt_state_t *st, double *scaled)
+                    fmt_state_t *st, int8_t pin, double *scaled)
 {
     double a = fabs(v);
     int e;
+
+    if (pin != FMT_PIN_AUTO) {
+        /* Clamped rather than rejected: the same pin is legal on an SI panel
+         * and meaningless on a byte count, and a panel that changes format
+         * should not become unconfigurable. */
+        e = pin < lo ? lo : (pin > hi ? hi : pin);
+        if (st) { st->exp = (int8_t)e; st->valid = true; }
+        *scaled = v / pow(base, (double)e);
+        return e;
+    }
 
     if (a == 0.0 || !isfinite(a)) {
         e = (st && st->valid) ? st->exp : 0;     /* zero keeps the current
@@ -102,6 +112,29 @@ static int pick_exp(double v, double base, int lo, int hi,
     if (st) { st->exp = (int8_t)e; st->valid = true; }
     *scaled = v / pow(base, (double)e);
     return e;
+}
+
+const char *ui_fmt_prefix_name(fmt_mode_t mode, int8_t e)
+{
+    switch (mode) {
+    case FMT_IEC:
+    case FMT_RATE_IEC: {
+        int i = e < 0 ? 0 : (e > IEC_MAX ? IEC_MAX : e);
+        return k_iec[i];
+    }
+    case FMT_AUTO:
+    case FMT_RAW:
+    case FMT_SI:
+    case FMT_RATE_SI:
+    case FMT_RATE_HOUR: {
+        int i = e < SI_MIN ? SI_MIN : (e > SI_MAX ? SI_MAX : e);
+        const char *n = k_si[i + SI_ZERO];
+        /* The empty prefix needs a name a person can tap. */
+        return n[0] ? n : "1";
+    }
+    default:
+        return NULL;      /* percentages, durations, booleans: no ladder */
+    }
 }
 
 void ui_fmt_duration(double seconds, char *out, size_t cap)
@@ -135,7 +168,7 @@ void ui_fmt_duration(double seconds, char *out, size_t cap)
 }
 
 void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
-                  fmt_state_t *st,
+                  fmt_state_t *st, int8_t pin,
                   char *num, size_t num_cap,
                   char *suffix, size_t suffix_cap,
                   bool *numeric_only)
@@ -180,7 +213,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     case FMT_IEC:
     case FMT_RATE_IEC: {
         double scaled = v;
-        int e = pick_exp(v, 1024.0, 0, IEC_MAX, st, &scaled);
+        int e = pick_exp(v, 1024.0, 0, IEC_MAX, st, pin, &scaled);
         int dp = decimals_tracked(scaled, st);
         if (e == 0) dp = 0;                       /* whole bytes, always */
         if (st) st->decimals = (int8_t)dp;
@@ -199,7 +232,7 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
          * picked is what makes 333/s read as 1.20 M/h rather than 1200 k/h. */
         if (mode == FMT_RATE_HOUR) v *= 3600.0;
         double scaled = v;
-        int e = pick_exp(v, 1000.0, SI_MIN, SI_MAX, st, &scaled);
+        int e = pick_exp(v, 1000.0, SI_MIN, SI_MAX, st, pin, &scaled);
         int dp = decimals_tracked(scaled, st);
         if (st) st->decimals = (int8_t)dp;
         snprintf(num, num_cap, "%.*f", dp, scaled);
@@ -223,18 +256,18 @@ void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
     }
 }
 
-void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit,
+void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
                  char *out, size_t cap)
 {
     char num[48], suf[24];
     bool numeric;
-    ui_fmt_value(v, mode, base_unit, NULL, num, sizeof(num),
+    ui_fmt_value(v, mode, base_unit, NULL, pin, num, sizeof(num),
                  suf, sizeof(suf), &numeric);
     if (suf[0]) snprintf(out, cap, "%s %s", num, suf);
     else        safe_copy(out, cap, num);
 }
 
-void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit,
+void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
                  char *out, size_t cap)
 {
     if (out == NULL || cap == 0) return;
@@ -256,7 +289,7 @@ void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit,
     default: {
         char num[32], suf[24];
         bool numeric;
-        ui_fmt_value(v, mode, base_unit, NULL, num, sizeof(num),
+        ui_fmt_value(v, mode, base_unit, NULL, pin, num, sizeof(num),
                      suf, sizeof(suf), &numeric);
         /* Drop a trailing ".00"/".0" so ticks line up in width. */
         char *dot = strchr(num, '.');

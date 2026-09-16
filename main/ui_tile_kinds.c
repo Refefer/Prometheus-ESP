@@ -67,6 +67,10 @@ typedef struct {
     lv_obj_t        *val, *suf;
     float            lo, hi;
     int              stale_range;   /* samples the range has been too wide */
+    /* The tile's pinned prefix, kept here because the axis is drawn from a
+     * callback that has no access to the refresh data. An axis reading "k"
+     * above a value reading plain units would be worse than no axis. */
+    int8_t           scale;
 } chart_priv_t;
 
 /* Refill the chart from the tile's history, rescaling if needed. */
@@ -155,6 +159,15 @@ static void stat_build(tile_inst_t *t, lv_obj_t *body)
 
     p->val = make_label(body, FONT_NUM_M, COL_TEXT);
     lv_obj_set_pos(p->val, 0, 0);
+    /*
+     * Bounded, because a pinned prefix can be asked for a number far wider
+     * than the tile -- pin a billion to plain units and it is ten digits. An
+     * over-wide value ellipses, which reads as "too big to show here"; left
+     * unbounded it is clipped mid-digit, which reads as a smaller number.
+     * The ellipsis is three periods, which the digits-only face does have.
+     */
+    lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
+    lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
 
     p->suf = make_label(body, FONT_M, COL_DIM);
     lv_obj_set_pos(p->suf, 0, TILE_H(t->spec->h) - 2 * PAD_S - 20 - 26);
@@ -192,6 +205,10 @@ static void spark_build(tile_inst_t *t, lv_obj_t *body)
     lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
 
     p->val = make_label(body, num_font(t, true), COL_TEXT);
+    /* Bounded for the same reason as the big number above: a pinned prefix
+     * can be handed a value far wider than the tile. */
+    lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
+    lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
     p->suf = make_label(body, FONT_M, COL_DIM);
     make_chart(t, body, p, 60, false);
 
@@ -260,7 +277,7 @@ static void chart_tick_cb(lv_event_t *e)
     if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
         float frac = (float)dsc->value / (float)CHART_SPAN;
         float v = p->lo + frac * (p->hi - p->lo);
-        ui_fmt_axis(v, FMT_SI, "", dsc->text, (size_t)dsc->text_length);
+        ui_fmt_axis(v, FMT_SI, "", p->scale, dsc->text, (size_t)dsc->text_length);
     } else {
         dsc->text[0] = '\0';      /* x ticks are handled by the caption */
     }
@@ -276,6 +293,10 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
     lv_coord_t h = TILE_H(t->spec->h) - 2 * PAD_S - 20;
 
     p->val = make_label(body, FONT_NUM_L, COL_TEXT);
+    /* Bounded for the same reason as the big number above: a pinned prefix
+     * can be handed a value far wider than the tile. */
+    lv_obj_set_width(p->val, TILE_W(t->spec->w) - 2 * PAD_S);
+    lv_label_set_long_mode(p->val, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(p->val, 0, 0);
     p->suf = make_label(body, FONT_M, COL_DIM);
 
@@ -304,6 +325,7 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
 static void chartt_update(tile_inst_t *t, const tile_data_t *d)
 {
     chart_priv_t *p = t->priv;
+    p->scale = d->scale;
     const lv_font_t *f = d->numeric_only ? FONT_NUM_L : FONT_XL;
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
@@ -379,8 +401,8 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     }
 
     char a[24], b[24];
-    ui_fmt_join(lo, FMT_SI, "", a, sizeof(a));
-    ui_fmt_join(hi, FMT_SI, "", b, sizeof(b));
+    ui_fmt_join(lo, FMT_SI, "", d->scale, a, sizeof(a));
+    ui_fmt_join(hi, FMT_SI, "", d->scale, b, sizeof(b));
     label_set_fmt_if_changed(p->range, "%s  -  %s", a, b);
 }
 
@@ -598,7 +620,7 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
     lv_chart_refresh(p->chart);
 
     char buf[32];
-    ui_fmt_join(0.0, d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+    ui_fmt_join(0.0, d->fmt, d->unit ? d->unit : "", d->scale, buf, sizeof(buf));
     label_set_if_changed(p->lo_lbl, buf);
 
     /* The last bound is +Inf by construction, so label the highest finite
@@ -607,13 +629,14 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
     for (int i = 0; i < d->n_buckets; i++) {
         if (isfinite(d->bucket_le[i])) hi = d->bucket_le[i];
     }
-    ui_fmt_join(hi, d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+    ui_fmt_join(hi, d->fmt, d->unit ? d->unit : "", d->scale, buf, sizeof(buf));
     label_set_if_changed(p->hi_lbl, buf);
 
     const float q[3] = { d->p50, d->p90, d->p99 };
     for (int i = 0; i < 3; i++) {
         if (isfinite(q[i])) {
-            ui_fmt_join(q[i], d->fmt, d->unit ? d->unit : "", buf, sizeof(buf));
+            ui_fmt_join(q[i], d->fmt, d->unit ? d->unit : "", d->scale,
+                        buf, sizeof(buf));
             label_set_if_changed(p->q_val[i], buf);
             text_color_if_changed(p->q_val[i], COL_TEXT);
         } else {

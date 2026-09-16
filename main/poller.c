@@ -37,6 +37,7 @@ typedef struct {
     char         label[POLLER_NAME_MAX];
     fmt_mode_t   fmt;
     char         unit[8];
+    int8_t       scale;          /* pinned prefix, or FMT_PIN_AUTO */
     panel_op_t   op;
     bool         multi;
     uint8_t      n_terms;
@@ -440,6 +441,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         watch_rt_t      *w = &s_watch[i];
         poller_metric_t *m = &next.m[i];
         m->panel_id = w->panel_id;
+        m->scale    = w->scale;
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;
@@ -482,7 +484,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 if (isfinite(cv)) {
                     fmt_state_t fs = {0};
                     char suf[12]; bool numeric;
-                    ui_fmt_value(cv, w->fmt, w->unit, &fs,
+                    ui_fmt_value(cv, w->fmt, w->unit, &fs, w->scale,
                                  m->child_num[k], sizeof(m->child_num[k]),
                                  suf, sizeof(suf), &numeric);
                 } else {
@@ -584,7 +586,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
         if (isfinite(shown)) {
             bool numeric = true;
-            ui_fmt_value(shown, w->fmt, w->unit, &w->fmt_state,
+            ui_fmt_value(shown, w->fmt, w->unit, &w->fmt_state, w->scale,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
             m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
@@ -991,6 +993,7 @@ static void reload_watches(void)
         w->op       = p->op;
         w->multi    = p->multi;
         w->fmt      = p->fmt;
+        w->scale    = p->scale;
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
 
         bool bad = false;

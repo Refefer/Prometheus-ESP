@@ -120,6 +120,12 @@ typedef struct {
     float       vmin, vmax;          /* NAN => auto */
     float       warn, crit;          /* NAN => no threshold */
     bool        lower_is_worse;
+    /*
+     * Pinned SI/IEC prefix, or FMT_PIN_AUTO. Presentation only: it changes
+     * how a number is written, never what it is, so it is deliberately not
+     * part of a panel's data fingerprint.
+     */
+    int8_t      scale;
     uint8_t     screen;              /* index into screens[] */
     uint8_t     col, row, w, h;
     /* A multi-series panel matches every series of its metric rather than one,

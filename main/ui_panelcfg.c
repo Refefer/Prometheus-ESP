@@ -39,6 +39,14 @@ static const struct { uint8_t w, h; const char *name; } k_sizes[4] = {
  * than for their arithmetic: nobody thinks "a/(a+b)", they think "what share
  * of the total is this".
  */
+/*
+ * Prefixes worth a button. Auto plus four steps up covers everything a panel
+ * on this screen shows; the sub-unit prefixes exist in the config for
+ * completeness but nothing here is measured in nanos.
+ */
+static const int8_t k_scales_ui[5] = { FMT_PIN_AUTO, 0, 1, 2, 3 };
+static lv_obj_t *s_scale_cap, *s_scale_btn[5];
+
 /* Quantiles worth a button. p50/p90/p99 is the usual trio; anything finer
  * needs more observations than a 5s scrape of a quiet service provides. */
 static const struct { float q; const char *name; } k_quants[3] = {
@@ -120,6 +128,22 @@ static void refresh(void)
         lv_obj_t *l = lv_obj_get_child(s_q_btn[i], 0);
         if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
     }
+    /* Labels come from the format's own ladder, so a byte panel offers B and
+     * KiB rather than 1 and k. A format with no ladder hides the row. */
+    const char *probe = ui_fmt_prefix_name(p->fmt, 0);
+    hidden_if_changed(s_scale_cap, probe == NULL);
+    for (int i = 0; i < 5; i++) {
+        hidden_if_changed(s_scale_btn[i], probe == NULL);
+        if (probe == NULL) continue;
+        const char *name = k_scales_ui[i] == FMT_PIN_AUTO
+                         ? "Auto" : ui_fmt_prefix_name(p->fmt, k_scales_ui[i]);
+        lv_obj_t *l = lv_obj_get_child(s_scale_btn[i], 0);
+        if (l) label_set_if_changed(l, name ? name : "?");
+        bool on = (p->scale == k_scales_ui[i]);
+        bg_color_if_changed(s_scale_btn[i], on ? COL_ACCENT : COL_PANEL);
+        if (l) text_color_if_changed(l, on ? COL_BG : COL_TEXT);
+    }
+
     for (int i = 0; i < 4; i++) {
         bool on = (t0->window_s == k_windows[i].s);
         bg_color_if_changed(s_win_btn[i], on ? COL_ACCENT : COL_PANEL);
@@ -398,6 +422,15 @@ static void screen_cb(lv_event_t *e)
     refresh();
 }
 
+static void scale_cb(lv_event_t *e)
+{
+    cfg_panel_t *p = panel();
+    if (p == NULL) return;
+    p->scale = k_scales_ui[(int)(intptr_t)lv_event_get_user_data(e)];
+    config_touch();
+    refresh();
+}
+
 static void move_cb(lv_event_t *e)
 {
     cfg_panel_t *p = panel();
@@ -617,6 +650,18 @@ void ui_panelcfg_open(uint16_t panel_id, void (*on_close)(void))
                          GRID_MX + 336 + cc * 33, -10 - (GRID_ROWS - 1 - r) * 23);
             s_map_cell[r][cc] = cell;
         }
+    }
+
+    /* Units. Auto-scaling keeps three significant digits but changes the
+     * unit as the value moves, which costs a glance to read; pinning trades
+     * digits for a number whose scale never shifts. */
+    s_scale_cap = make_label(s_root, FONT_S, COL_DIM);
+    lv_label_set_text(s_scale_cap, "Units");
+    lv_obj_set_pos(s_scale_cap, GRID_MX, 336);
+    for (int i = 0; i < 5; i++) {
+        s_scale_btn[i] = make_btn(s_root, "", scale_cb, (void *)(intptr_t)i);
+        lv_obj_set_size(s_scale_btn[i], 60, 38);
+        lv_obj_set_pos(s_scale_btn[i], GRID_MX + i * 64, 356);
     }
 
     /* Which screen the tile lives on. Without this a tile placed on a second

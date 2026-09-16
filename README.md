@@ -83,6 +83,23 @@ name, type, how many label sets, and a sample selector to copy. That is the
 half `/schema` cannot provide: the format is knowable from the firmware, but
 which metrics exist is not.
 
+### Units
+
+`panel.scale` pins the SI/IEC prefix. Auto-scaling is the default and keeps
+three significant digits at any magnitude, but it means the unit moves as the
+value does -- a series sitting near a thousand alternates between `847 tok/s`
+and `1.20 ktok/s`, which are the same reading in different clothes and take a
+second look to tell apart. Pinning trades significant digits for a number
+whose scale never shifts, so a glance across the room is enough.
+
+The names are the SI ladder (`auto 1 k M G T P m u n p`) and map by position
+on a byte panel: `k` is KiB, `M` is MiB. Formats with no ladder -- percent,
+duration, bool -- ignore it. On the glass it is the Units row in a tile's
+settings, labelled from whichever ladder that tile's format uses.
+
+A pin applies to the axis and the quantiles as well as the value, so nothing
+on a tile can disagree with the number above it.
+
 ### Windows
 
 `term.window_s` is the span a rate or quantile covers, and it means what it

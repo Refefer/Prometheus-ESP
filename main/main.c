@@ -703,6 +703,7 @@ static void dashboard_tick(lv_timer_t *timer)
                 .p99          = m->p99,
                 .fmt          = (fmt_mode_t)m->fmt,
                 .unit         = m->unit,
+                .scale        = m->scale,
                 .n_children   = m->n_children,
                 .n_matched    = m->n_matched,
                 .child_label  = m->child_label,

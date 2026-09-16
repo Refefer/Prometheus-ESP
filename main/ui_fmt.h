@@ -41,6 +41,23 @@ typedef enum {
     FMT_MODE_COUNT,
 } fmt_mode_t;
 
+/*
+ * A pinned SI/IEC prefix, or FMT_PIN_AUTO to let the value choose.
+ *
+ * Auto-scaling is the right default -- it keeps three significant digits
+ * whatever the magnitude -- but it means a tile changes its unit as the value
+ * moves, and a wall panel is read at a glance. If prefill sits near a
+ * thousand, "847 tok/s" and "1.20 ktok/s" are the same reading wearing
+ * different clothes, and telling them apart across the room takes a second
+ * look. Pinning the prefix trades significant digits for a number whose scale
+ * never moves.
+ *
+ * The value is the ladder exponent, and it means the same thing in both
+ * ladders: 0 is no prefix, 1 is k or Ki, 2 is M or Mi. Negative steps below 1
+ * exist only for SI and are clamped away for byte counts.
+ */
+#define FMT_PIN_AUTO ((int8_t)-128)
+
 /* How a counter's samples become the displayed number. */
 typedef enum {
     AGG_LAST = 0,   /* the value as scraped (gauges) */
@@ -87,18 +104,27 @@ typedef struct {
  * formatting like axis labels, wrong for a live tile).
  */
 void ui_fmt_value(double v, fmt_mode_t mode, const char *base_unit,
-                  fmt_state_t *st,
+                  fmt_state_t *st, int8_t pin,
                   char *num, size_t num_cap,
                   char *suffix, size_t suffix_cap,
                   bool *numeric_only);
 
 /* Convenience: num and suffix joined with a space, for logs and lists. */
-void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit,
+void ui_fmt_join(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
                  char *out, size_t cap);
 
-/* Compact form for chart axis ticks: no hysteresis, 3 chars where possible. */
-void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit,
+/* Compact form for chart axis ticks: no hysteresis, 3 chars where possible.
+ * Takes the pin so an axis cannot disagree with the value above it. */
+void ui_fmt_axis(double v, fmt_mode_t mode, const char *base_unit, int8_t pin,
                  char *out, size_t cap);
+
+/*
+ * The prefix a pin would produce, for labelling a chooser: "1", "k", "M" on
+ * an SI ladder, "B", "KiB", "MiB" on a byte count. NULL when the format has
+ * no ladder at all -- percentages, durations and booleans cannot be pinned,
+ * and a chooser offering it would be lying.
+ */
+const char *ui_fmt_prefix_name(fmt_mode_t mode, int8_t e);
 
 /* Seconds -> exactly two units, never three. */
 void ui_fmt_duration(double seconds, char *out, size_t cap);

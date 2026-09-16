@@ -62,6 +62,7 @@ typedef struct {
     float        p50, p90, p99;
     fmt_mode_t   fmt;         /* how to render the quantiles */
     const char  *unit;
+    int8_t       scale;       /* pinned prefix, or FMT_PIN_AUTO */
 
     /* Multi-series extras. */
     uint8_t        n_children;
