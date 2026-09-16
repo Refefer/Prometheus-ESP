@@ -65,6 +65,7 @@ typedef struct {
     const char  *unit;
     int8_t       scale;       /* pinned prefix, or FMT_PIN_AUTO */
     bool         group;       /* thousands separators */
+    float        peak;        /* largest seen; the auto full scale */
 
     /* Multi-series extras. */
     uint8_t        n_children;

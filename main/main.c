@@ -843,6 +843,7 @@ static void dashboard_tick(lv_timer_t *timer)
                 .unit         = m->unit,
                 .scale        = m->scale,
                 .group        = m->group,
+                .peak         = m->peak,
                 .n_children   = m->n_children,
                 .n_matched    = m->n_matched,
                 .child_label  = m->child_label,

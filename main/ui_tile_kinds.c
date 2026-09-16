@@ -412,7 +412,24 @@ const tile_vt_t tile_chart_vt = {
 static float ratio_hi(const tile_inst_t *t, const tile_data_t *d)
 {
     if (!isnan(t->spec->vmax)) return t->spec->vmax;
-    return d->fmt == FMT_PCT_100 ? 100.0f : 1.0f;
+
+    /*
+     * vmin/vmax are in the DISPLAYED domain, not the source one: the poller
+     * publishes a 0..1 ratio as 0..100 for a percent panel, so full scale is
+     * 100 whatever the metric underneath reads. Getting this backwards gave a
+     * percent gauge a range of 1 against a value of 98, and an arc that was
+     * simply always full.
+     */
+    if (d->fmt == FMT_PCT_01 || d->fmt == FMT_PCT_100) return 100.0f;
+
+    /*
+     * Otherwise the highest reading so far. A gauge needs a full scale and
+     * there is often nowhere to look one up -- an inference server does not
+     * export its own concurrency limit -- so the peak is the only number
+     * available that means anything. Before the first sample it is 1, which
+     * is what the old default was for everything.
+     */
+    return (d->peak > 0.0f) ? d->peak : 1.0f;
 }
 
 /* -------------------------------------------------------------- TILE_BAR */
@@ -534,7 +551,23 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
     gauge_priv_t *p = t->priv;
     label_set_if_changed(p->val, d->valid ? d->num : "--");
     text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
-    label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+
+    /*
+     * On an auto-ranged gauge the caption says what full scale is, because
+     * otherwise the needle is a fraction of a number the reader cannot see --
+     * "5" against an invisible maximum tells you nothing.
+     */
+    if (d->valid && isnan(t->spec->vmax) &&
+        d->fmt != FMT_PCT_01 && d->fmt != FMT_PCT_100 && d->peak > 0.0f) {
+        char pk[32], line[48];
+        fmt_style_t psy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group,
+                            NULL, NULL };
+        ui_fmt_join(d->peak, &psy, pk, sizeof(pk));
+        snprintf(line, sizeof(line), "of %s", pk);
+        label_set_if_changed(p->suf, line);
+    } else {
+        label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+    }
     lv_obj_align(p->val, LV_ALIGN_CENTER, 0, -4);
     lv_obj_align(p->suf, LV_ALIGN_CENTER, 0, 22);
 

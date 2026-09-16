@@ -168,6 +168,18 @@ rebuild, keyed by panel id and data fingerprint, and the tiles repaint from
 the snapshot already in hand rather than waiting for the next scrape. The same
 carry covers a change of widget kind, which the adopt path cannot handle.
 
+`vmin`/`vmax` are in the **displayed** domain -- a percent panel reads 0..100
+whatever ratio feeds it. `null` means auto: 100 for a percent, and otherwise
+**the largest value seen so far**. That is the answer for a gauge whose full
+scale nobody can look up: an inference server does not export its own
+concurrency limit, so the highest reading yet is the only honest 100%. The
+caption says what that is (`of 6`), because a needle against an invisible
+maximum tells you nothing.
+
+The peak never decays -- "the most this has ever been" is the question -- and
+resets when the device restarts or the panel's terms change. It survives a
+rename, a resize, and a config push.
+
 `panel.ramp` colours a gauge or bar by where the value sits in its range:
 `heat` runs ok to crit as it rises, `cool` reverses that for things where low
 is the problem, `series` steps through the categorical palette, and `none`

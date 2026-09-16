@@ -66,6 +66,7 @@ typedef struct {
      * quantiles cannot disagree with the number above them. */
     int8_t  scale;
     bool    group;
+    float   peak;     /* largest value seen; the auto full-scale for a gauge */
 
     /* Multi-series extras: one row per matching series, ranked by value. */
     uint8_t n_children;

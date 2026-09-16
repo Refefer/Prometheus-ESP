@@ -664,7 +664,7 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"panel.screen\":   \"which page the tile is on, swiped between; must be < the length of screens[]\",\n"
 "    \"panel.w/h\":      \"span in cells; a widget below its minimum is refused (chart and histogram need 2x2, multi needs 2x1)\",\n"
 "    \"panel.op\":       \"share = a/(a+b), ratio = a/b, diff = a-b, sum = a+b+...; none means a single term\",\n"
-"    \"panel.vmin/vmax\":\"gauge and bar range, in the SOURCE domain rather than the displayed one -- a percent panel is fed a 0..1 ratio, so its full scale is 1, not 100. null takes that default from the format.\",\n"
+"    \"panel.vmin/vmax\":\"gauge and bar range, in the DISPLAYED domain: a percent panel reads 0..100 whatever its source ratio is. null means auto -- 100 for a percent, and otherwise the largest value seen so far, which is the only full scale available for something like a concurrency limit the server does not export. The peak resets when the device restarts or the panel's terms change.\",\n"
 "    \"panel.warn/crit\":\"threshold colouring; null means none\",\n"
 "    \"panel.multi\":    \"show every matching series as ranked rows instead of one number\",\n"
 "    \"panel.prefix/suffix\": \"free text wrapped around the value -- \\\"$\\\" or \\\" EUR\\\" -- for labels the SI ladder cannot express. Distinct from unit, which is part of the magnitude and moves with the prefix. The large digit faces carry only digits, punctuation and the currency marks $ c/ L- Y= E=; anything else drops the value to a smaller text face rather than vanishing.\",\n"

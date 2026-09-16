@@ -40,6 +40,15 @@ typedef struct {
     int8_t       scale;          /* pinned prefix, or FMT_PIN_AUTO */
     bool         group;          /* thousands separators */
     char         prefix[8], suffix[8];
+    /*
+     * The largest displayed value seen since this term was defined.
+     *
+     * For the gauges whose full scale nobody can look up -- concurrent
+     * requests against a limit the server does not export -- the highest
+     * reading so far is the only honest 100%. It never decays: "the most this
+     * has ever been" is the question being asked.
+     */
+    double       peak;
     panel_op_t   op;
     bool         multi;
     uint8_t      n_terms;
@@ -452,6 +461,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
         m->panel_id = w->panel_id;
         m->scale    = w->scale;
         m->group    = w->group;
+        m->peak     = (float)w->peak;
         strncpy(m->label, w->label, sizeof(m->label) - 1);
         strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
         m->fmt = (uint8_t)w->fmt;
@@ -614,6 +624,7 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                          m->suffix, sizeof(m->suffix), &numeric);
             m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
                                               : (float)shown;
+            if (isfinite(m->value) && m->value > w->peak) w->peak = m->value;
             m->numeric_only = numeric;
             m->valid = true;
         }
@@ -953,6 +964,9 @@ static void carry_state(watch_rt_t *w, watch_rt_t *old)
      * order of a multi tile is about the set the terms produce.
      */
     w->fmt_state = old->fmt_state;
+    /* The peak belongs to the series, so it survives a rename or a resize and
+     * starts again when the terms change. */
+    w->peak = old->peak;
     if (w->multi == old->multi) {
         memcpy(w->child_key,  old->child_key,  sizeof(w->child_key));
         memcpy(w->child_rate, old->child_rate, sizeof(w->child_rate));
