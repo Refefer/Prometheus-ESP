@@ -115,14 +115,27 @@ typedef struct {
  */
 typedef struct {
     fmt_mode_t  mode;
-    const char *unit;    /* base unit appended after the prefix, e.g. "tok" */
+    const char *unit;    /* base unit inside the ladder, e.g. "tok" -> "ktok" */
     int8_t      pin;     /* FMT_PIN_AUTO, or a fixed ladder exponent */
     bool        group;   /* thousands separators: 17,321 rather than 17321 */
+    /*
+     * Free text wrapped around the finished number -- "$" and "1,234" and
+     * " EUR" -- for the labels the ladder cannot express. Distinct from
+     * `unit`, which is part of the magnitude ("ktok/s") and moves with the
+     * prefix; these do not.
+     *
+     * Either may be NULL. They ride in the numeric label with the digits, so
+     * a symbol outside the digits-only charset drops the whole value to a
+     * text face rather than vanishing -- the same fallback durations use.
+     */
+    const char *prefix;
+    const char *suffix;
 } fmt_style_t;
 
 /* The plain default: auto prefix, no grouping, no unit. */
 #define FMT_STYLE(m) ((fmt_style_t){ .mode = (m), .unit = "", \
-                                     .pin = FMT_PIN_AUTO, .group = false })
+                                     .pin = FMT_PIN_AUTO, .group = false, \
+                                     .prefix = NULL, .suffix = NULL })
 
 void ui_fmt_value(double v, const fmt_style_t *sy, fmt_state_t *st,
                   char *num, size_t num_cap,
@@ -143,6 +156,18 @@ void ui_fmt_axis(double v, const fmt_style_t *sy, char *out, size_t cap);
  * and a chooser offering it would be lying.
  */
 const char *ui_fmt_prefix_name(fmt_mode_t mode, int8_t e);
+
+/*
+ * True if every character can be drawn by the large digits-only faces.
+ *
+ * Those faces carry " !$%+,-./0-9:" plus the currency marks, and nothing
+ * else; a glyph they lack draws as NOTHING rather than as a box, so a letter
+ * reaching them makes the value disappear from the tile. This is the single
+ * definition of that charset -- the generator script and the host sweep both
+ * describe the same set, and this is what the formatter actually enforces.
+ * UTF-8 aware, because the euro sign is three bytes.
+ */
+bool ui_fmt_digits_safe(const char *s);
 
 /* Seconds -> exactly two units, never three. */
 void ui_fmt_duration(double seconds, char *out, size_t cap);

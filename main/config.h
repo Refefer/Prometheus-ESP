@@ -129,6 +129,10 @@ typedef struct {
     /* Thousands separators. Presentation only, like scale -- it changes how
      * the number is written, never what it is. */
     bool        group;
+    /* Free text wrapped around the value -- "$", " EUR" -- for labels the SI
+     * ladder cannot express. Presentation only, like scale and group. */
+    char        prefix[8];
+    char        suffix[8];
     uint8_t     screen;              /* index into screens[] */
     uint8_t     col, row, w, h;
     /* A multi-series panel matches every series of its metric rather than one,

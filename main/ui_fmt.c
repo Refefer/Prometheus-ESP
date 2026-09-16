@@ -179,6 +179,34 @@ void ui_fmt_duration(double seconds, char *out, size_t cap)
  * Silently does nothing if the result would not fit, which leaves a correct
  * ungrouped number rather than a truncated grouped one.
  */
+/*
+ * The codepoints the generated digit faces carry -- kept beside the formatter
+ * because this is the only place that can enforce the invariant, and
+ * tools/gen_fonts.sh's -r argument must list exactly these.
+ */
+bool ui_fmt_digits_safe(const char *s)
+{
+    if (s == NULL) return true;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+        uint32_t cp;
+        if (*p < 0x80)              { cp = *p; p += 1; }
+        else if ((*p & 0xE0) == 0xC0 && p[1]) {
+            cp = (uint32_t)(*p & 0x1F) << 6 | (p[1] & 0x3F);          p += 2;
+        } else if ((*p & 0xF0) == 0xE0 && p[1] && p[2]) {
+            cp = (uint32_t)(*p & 0x0F) << 12 | (uint32_t)(p[1] & 0x3F) << 6
+               | (p[2] & 0x3F);                                        p += 3;
+        } else return false;        /* 4-byte or malformed: nothing we carry */
+
+        bool ok = (cp >= '0' && cp <= '9') ||
+                  cp == ' '  || cp == '!' || cp == '$' || cp == '%' ||
+                  cp == '+'  || cp == ',' || cp == '-' || cp == '.' ||
+                  cp == '/'  || cp == ':' ||
+                  cp == 0xA2 || cp == 0xA3 || cp == 0xA5 || cp == 0x20AC;
+        if (!ok) return false;
+    }
+    return true;
+}
+
 static void group_thousands(char *s, size_t cap)
 {
     if (s == NULL) return;
@@ -310,6 +338,27 @@ void ui_fmt_value(double v, const fmt_style_t *sy, fmt_state_t *st,
     fmt_value_core(v, sy->mode, sy->unit, st, sy->pin,
                    num, num_cap, suffix, suffix_cap, &numeric);
     if (sy->group && numeric) group_thousands(num, num_cap);
+
+    /*
+     * Wrapped last, so grouping sees only digits and a "$" is never counted
+     * as one. The affixes ride with the number rather than in the unit label
+     * beside it, because "$ 1,234" with a gap and a lighter weight is not
+     * what a currency reads like.
+     */
+    bool pre = sy->prefix && sy->prefix[0];
+    bool suf = sy->suffix && sy->suffix[0];
+    if (pre || suf) {
+        char tmp[80];
+        snprintf(tmp, sizeof(tmp), "%s%s%s",
+                 pre ? sy->prefix : "", num, suf ? sy->suffix : "");
+        safe_copy(num, num_cap, tmp);
+        /* A symbol the digit faces lack would draw as nothing, so the whole
+         * value steps down to a text face instead -- exactly what a duration
+         * already does. */
+        if (numeric && !(ui_fmt_digits_safe(sy->prefix) &&
+                         ui_fmt_digits_safe(sy->suffix))) numeric = false;
+    }
+
     if (numeric_only) *numeric_only = numeric;
 }
 

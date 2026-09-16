@@ -39,6 +39,7 @@ typedef struct {
     char         unit[8];
     int8_t       scale;          /* pinned prefix, or FMT_PIN_AUTO */
     bool         group;          /* thousands separators */
+    char         prefix[8], suffix[8];
     panel_op_t   op;
     bool         multi;
     uint8_t      n_terms;
@@ -502,7 +503,8 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 if (isfinite(cv)) {
                     fmt_state_t fs = {0};
                     char suf[12]; bool numeric;
-                    fmt_style_t csy = { w->fmt, w->unit, w->scale, w->group };
+                    fmt_style_t csy = { w->fmt, w->unit, w->scale, w->group,
+                                        w->prefix, w->suffix };
                     ui_fmt_value(cv, &csy, &fs,
                                  m->child_num[k], sizeof(m->child_num[k]),
                                  suf, sizeof(suf), &numeric);
@@ -605,7 +607,8 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
         if (isfinite(shown)) {
             bool numeric = true;
-            fmt_style_t vsy = { w->fmt, w->unit, w->scale, w->group };
+            fmt_style_t vsy = { w->fmt, w->unit, w->scale, w->group,
+                                w->prefix, w->suffix };
             ui_fmt_value(shown, &vsy, &w->fmt_state,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
@@ -1012,6 +1015,8 @@ static void reload_watches(void)
         w->fmt      = p->fmt;
         w->scale    = p->scale;
         w->group    = p->group;
+        strncpy(w->prefix, p->prefix, sizeof(w->prefix) - 1);
+        strncpy(w->suffix, p->suffix, sizeof(w->suffix) - 1);
         strncpy(w->unit, p->unit, sizeof(w->unit) - 1);
 
         bool bad = false;

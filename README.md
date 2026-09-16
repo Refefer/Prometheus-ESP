@@ -100,6 +100,17 @@ settings, labelled from whichever ladder that tile's format uses.
 A pin applies to the axis and the quantiles as well as the value, so nothing
 on a tile can disagree with the number above it.
 
+`panel.prefix` and `panel.suffix` wrap free text around the value -- `$1,234`
+or `1,234 EUR` -- for labels the SI ladder cannot express. They are distinct
+from `unit`, which is part of the magnitude and moves with the prefix
+(`ktok/s`); these do not.
+
+The large digit faces carry only digits, punctuation and the currency marks
+`$ c/ L- Y= E=`, because a glyph a font lacks draws as *nothing* rather than as
+a box. `ui_fmt_digits_safe` is the single definition of that set, and an affix
+outside it drops the whole value to a smaller text face rather than vanishing
+-- the same fallback durations already use.
+
 A `multi` panel's rows use the same window as its single value would. Both go
 through one ring, so the two cannot drift apart again.
 

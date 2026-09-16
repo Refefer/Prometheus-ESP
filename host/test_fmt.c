@@ -20,11 +20,24 @@ static int g_ran, g_fail;
 static const char *J(double v, fmt_mode_t m, const char *u, int8_t pin,
                      bool group)
 {
-    static char buf[80];
-    fmt_style_t sy = { m, u, pin, group };
+    static char buf[96];
+    fmt_style_t sy = { m, u, pin, group, NULL, NULL };
     ui_fmt_join(v, &sy, buf, sizeof(buf));
     return buf;
 }
+
+static const char *JA(double v, fmt_mode_t m, int8_t pin, bool group,
+                      const char *pre, const char *suf, bool *numeric)
+{
+    static char num[96], sfx[24];
+    fmt_style_t sy = { m, "", pin, group, pre, suf };
+    ui_fmt_value(v, &sy, NULL, num, sizeof(num), sfx, sizeof(sfx), numeric);
+    return num;
+}
+#define EQA(v, m, pin, group, pre, suf, want) do { \
+    bool numeric_; const char *got_ = JA(v, m, pin, group, pre, suf, &numeric_); \
+    CHECK(strcmp(got_, want) == 0, "affixed -> \"%s\", want \"%s\"", got_, want); \
+} while (0)
 #define EQ(v, m, u, want) \
     CHECK(strcmp(J(v, m, u, FMT_PIN_AUTO, false), want) == 0, \
           "%g -> \"%s\", want \"%s\"", \
@@ -327,10 +340,41 @@ static void test_grouping(void)
     EQ(17321.0, FMT_RAW, "", "17321");
 }
 
+static void test_affixes(void)
+{
+    printf("prefix and suffix\n");
+
+    EQA(1234.0, FMT_RAW, 0, true,  "$",  NULL, "$1,234");
+    EQA(1234.0, FMT_RAW, 0, true,  NULL, " \u20ac", "1,234 \u20ac");
+    EQA(1234.0, FMT_RAW, 0, true,  "\u00a3", NULL, "\u00a31,234");
+    EQA(-42.0,  FMT_RAW, 0, false, "$",  NULL, "$-42.0");
+
+    /* Grouping runs before the affixes, so a symbol is never counted as a
+     * digit -- "$1234" must not become "$1,23,4" or similar. */
+    EQA(1000000.0, FMT_RAW, 0, true, "$", NULL, "$1,000,000");
+
+    /* The charset is what decides whether the big faces can be used. */
+    CHECK(ui_fmt_digits_safe("$1,234") == true,  "dollar is carried");
+    CHECK(ui_fmt_digits_safe("\u20ac") == true,  "euro is carried");
+    CHECK(ui_fmt_digits_safe("\u00a2\u00a3\u00a5") == true, "cent pound yen carried");
+    CHECK(ui_fmt_digits_safe("USD") == false,    "letters are not");
+    CHECK(ui_fmt_digits_safe("\u00b5") == false, "micro sign is not");
+    CHECK(ui_fmt_digits_safe(NULL) == true,      "nothing is safe");
+
+    /* A symbol outside the charset drops the value to a text face rather than
+     * vanishing -- the flag the tile reads to choose the font. */
+    bool numeric;
+    JA(12.0, FMT_RAW, FMT_PIN_AUTO, false, "$", NULL, &numeric);
+    CHECK(numeric == true, "a dollar keeps the digit face");
+    JA(12.0, FMT_RAW, FMT_PIN_AUTO, false, "USD ", NULL, &numeric);
+    CHECK(numeric == false, "letters fall back to a text face");
+}
+
 static void test_charset_invariant(void)
 {
     printf("digits-only font charset invariant\n");
-    static const char *allowed = " !%+,-./0123456789:";
+    /* The same set ui_fmt_digits_safe enforces and gen_fonts.sh generates. */
+    static const char *allowed = " !$%+,-./0123456789:";
     const fmt_mode_t modes[] = { FMT_RAW, FMT_SI, FMT_IEC, FMT_PCT_01,
                                  FMT_PCT_100, FMT_RATE_SI, FMT_RATE_IEC,
                                  FMT_RATE_HOUR };
@@ -409,6 +453,7 @@ int main(void)
     test_rate_hour();
     test_pinned_prefix();
     test_grouping();
+    test_affixes();
     test_charset_invariant();
     test_infer();
     printf("\n%d checks, %d failures\n", g_ran, g_fail);
