@@ -33,10 +33,15 @@ typedef struct {
     uint16_t    panel_id;     /* so a tap can open the right settings */
     const char *title;
     tile_kind_t kind;
+    uint8_t     screen;           /* which page it belongs to */
     uint8_t     col, row, w, h;   /* grid position and span */
     float       vmin, vmax;       /* BAR/GAUGE range; NAN = auto from history */
     float       warn, crit;       /* NAN = no threshold */
     bool        lower_is_worse;   /* thresholds compare the other way */
+    /* config_panel_fingerprint of the panel behind this tile. A tile whose
+     * fingerprint changed is showing a different series, so its accumulated
+     * history is no longer about what it is about to display. */
+    uint32_t    data_fp;
 } tile_spec_t;
 
 /* One refresh's worth of already-resolved data. Renderers do no maths. */
@@ -95,6 +100,26 @@ struct tile_inst {
 };
 
 const tile_vt_t *tile_vt(tile_kind_t k);
+
+/*
+ * Rebind an existing tile to a new spec, in place.
+ *
+ * Only the fields that can change without changing the widget: title and
+ * grid position. The caller must already have established that the kind, the
+ * span and the data fingerprint are unchanged -- anything else and the tile
+ * has to be rebuilt, which is what discards its history.
+ */
+void tile_adopt(tile_inst_t *t, const tile_spec_t *spec);
+
+/*
+ * Show or hide a tile without destroying it.
+ *
+ * Tiles exist for every screen, not just the one on display, so paging is a
+ * visibility change rather than a teardown. A hidden tile keeps accumulating
+ * history and takes no input, so swiping to a page finds its charts already
+ * drawn instead of empty.
+ */
+void tile_set_visible(tile_inst_t *t, bool on);
 
 /* Called when a tile is tapped. Set once at startup. */
 void tile_set_tap_handler(void (*cb)(uint16_t panel_id));

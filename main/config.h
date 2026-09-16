@@ -233,6 +233,16 @@ bool         config_has_panel(uint16_t ep_id, const char *sel);
  * loader rejects a config where one does not -- so anything placing a panel
  * on a new screen has to call this first.
  */
+/*
+ * A fingerprint of everything that determines a panel's numbers: its terms,
+ * how they are combined, and which endpoint they come from. Presentation --
+ * title, widget, position, span, colours -- is deliberately excluded, so
+ * moving or retitling a tile does not look like a different metric.
+ *
+ * Used to decide whether accumulated history is still about the same series.
+ */
+uint32_t config_panel_fingerprint(const cfg_panel_t *p);
+
 bool config_ensure_screen(uint8_t idx);
 
 bool config_place_panel(cfg_panel_t *p);

@@ -21,6 +21,17 @@
 #define TERM_WIN_MAX     24
 
 typedef struct {
+    /*
+     * The selector exactly as configured.
+     *
+     * Kept apart from `scratch`, which prom_parse_selector rewrites in place
+     * into name\0key\0value\0..., because a reload has to answer "is this
+     * the same term as before" to decide whether the baselines below are
+     * still about the same series. A destructively parsed buffer cannot
+     * answer that.
+     */
+    char         sel[CFG_SEL_MAX];
+
     /* --- selector, parsed once at reload --- */
     char         scratch[CFG_SEL_MAX];
     const char  *name;
@@ -43,7 +54,14 @@ typedef struct {
     double       le[TERM_MAX_BUCKETS];
     double       cum[TERM_MAX_BUCKETS];
 
-    /* --- carried between scrapes --- */
+    /*
+     * --- carried between scrapes, and across a reload when the term above
+     * is unchanged ---
+     *
+     * A one-hour window takes an hour to fill and a counter baseline is lost
+     * the moment it is dropped, so throwing this away because some other
+     * panel was edited means every save costs every tile its history.
+     */
     rate_state_t rate;
     double       win_v[TERM_WIN_MAX];
     int64_t      win_t[TERM_WIN_MAX];

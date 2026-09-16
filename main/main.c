@@ -273,31 +273,82 @@ static void build_tiles(lv_obj_t *scr)
     int nav = screens_navigable();
     if ((int)s_screen >= nav) s_screen = (uint8_t)(nav - 1);
 
-    for (int i = 0; i < s_tile_n; i++) {
-        if (s_tiles[i]) { tile_destroy(s_tiles[i]); s_tiles[i] = NULL; }
-    }
-    s_tile_n = 0;
+    /*
+     * Tiles are adopted, not rebuilt, wherever they can be.
+     *
+     * Saving anything rewrites every panel, and destroying every tile to
+     * rebuild it throws away the chart history each one has accumulated --
+     * so moving one tile used to blank the other eleven. A tile survives when
+     * it is still the same widget at the same size showing the same series;
+     * its title and position are allowed to change, because neither affects
+     * what the numbers mean. This is the display half of the same rule the
+     * poller applies to its baselines.
+     */
+    tile_inst_t *keep[CFG_MAX_PANELS];
+    tile_spec_t  had[CFG_MAX_PANELS];
+    int          had_n = s_tile_n;
+    memcpy(keep, s_tiles, sizeof(keep));
+    memcpy(had,  s_specs, sizeof(had));
+
+    /* The specs we want, built before anything is torn down so the old and
+     * new lists can be compared. */
+    tile_spec_t want[CFG_MAX_PANELS];
+    int adopt[CFG_MAX_PANELS];
+    int want_n = 0;
 
     const config_t *c = config_get();
-    for (int i = 0; i < c->n_panels && s_tile_n < CFG_MAX_PANELS; i++) {
+    for (int i = 0; i < c->n_panels && want_n < CFG_MAX_PANELS; i++) {
         const cfg_panel_t *p = &c->panels[i];
         if (p->sel[0] == '\0') continue;
-        if (p->screen != s_screen) continue;
 
-        tile_spec_t *sp = &s_specs[s_tile_n];
+        tile_spec_t *sp = &want[want_n];
         memset(sp, 0, sizeof(*sp));
         sp->panel_id = p->id;
         sp->title = p->title[0] ? p->title : p->sel;
         sp->kind  = p->kind;
+        sp->screen = p->screen;
         sp->col   = p->col;  sp->row = p->row;
         sp->w     = p->w ? p->w : 1;
         sp->h     = p->h ? p->h : 1;
         sp->vmin  = p->vmin; sp->vmax = p->vmax;
         sp->warn  = p->warn; sp->crit = p->crit;
         sp->lower_is_worse = p->lower_is_worse;
-        s_tiles[s_tile_n] = tile_create(scr, sp);
-        s_tile_n++;
+        sp->data_fp = config_panel_fingerprint(p);
+
+        adopt[want_n] = -1;
+        for (int j = 0; j < had_n; j++) {
+            if (keep[j] == NULL) continue;
+            if (had[j].panel_id != sp->panel_id) continue;
+            if (had[j].kind != sp->kind || had[j].w != sp->w ||
+                had[j].h != sp->h || had[j].data_fp != sp->data_fp) continue;
+            adopt[want_n] = j;
+            break;
+        }
+        want_n++;
     }
+
+    /* Whatever nothing claimed is genuinely gone. Done before the spec array
+     * is rewritten, since a tile holds a pointer into it. */
+    for (int j = 0; j < had_n; j++) {
+        bool claimed = false;
+        for (int k = 0; k < want_n; k++) if (adopt[k] == j) { claimed = true; break; }
+        if (!claimed && keep[j]) { tile_destroy(keep[j]); keep[j] = NULL; }
+    }
+
+    memcpy(s_specs, want, sizeof(want));
+    s_tile_n = want_n;
+    for (int k = 0; k < want_n; k++) {
+        if (adopt[k] >= 0) {
+            s_tiles[k] = keep[adopt[k]];
+            tile_adopt(s_tiles[k], &s_specs[k]);
+        } else {
+            s_tiles[k] = tile_create(scr, &s_specs[k]);
+        }
+        tile_set_visible(s_tiles[k], s_specs[k].screen == s_screen);
+    }
+
+    int on_screen = 0;
+    for (int k = 0; k < want_n; k++) if (s_specs[k].screen == s_screen) on_screen++;
 
     /* Placeholders for every cell nothing covers. */
     for (int i = 0; i < s_hole_n; i++) {
@@ -350,8 +401,8 @@ static void build_tiles(lv_obj_t *scr)
 
     /* With outlines showing, an empty screen no longer reads as a fault, so
      * the hint only needs to explain the gesture once. */
-    hidden_if_changed(s_empty, s_tile_n > 0);
-    if (s_tile_n == 0) {
+    hidden_if_changed(s_empty, on_screen > 0);
+    if (on_screen == 0) {
         label_set_if_changed(s_empty, s_screen > 0
             ? "New screen -- tap a  +  to put something here"
             : "Tap a  +  to choose what goes there");
@@ -593,8 +644,13 @@ static void dashboard_tick(lv_timer_t *timer)
 
     static int beat;
     if (beat++ % 20 == 0) {
-        ESP_LOGI(TAG, "ui alive: tiles=%d seen_gen=%u stack_hw=%u",
-                 s_tile_n, (unsigned)s_seen_gen,
+        /* Tiles exist for every screen; only one screen's are shown. Both
+         * numbers matter -- "8 of 10" says paging is working, "10 of 10"
+         * after a swipe would say it is not. */
+        int vis = 0;
+        for (int i = 0; i < s_tile_n; i++) if (s_specs[i].screen == s_screen) vis++;
+        ESP_LOGI(TAG, "ui alive: tiles=%d/%d seen_gen=%u stack_hw=%u",
+                 vis, s_tile_n, (unsigned)s_seen_gen,
                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
 

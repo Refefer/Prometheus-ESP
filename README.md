@@ -96,6 +96,24 @@ since only the baseline comes from the ring.
 on the wire is unchanged -- it is a unit, for the questions that are about
 volume rather than speed.
 
+### What a save does not reset
+
+Saving anything rewrites every panel, and the accumulated state -- counter
+baselines, windowed rings, quantile baselines, chart history -- is expensive
+to rebuild: an hour-long window needs another hour. So it is carried across a
+reload wherever the thing that produced it is unchanged.
+
+The rule is one question asked in two places: *does this produce the same
+numbers?* Selector, reduce, agg, window and quantile decide it. Title, widget,
+position, span and colour do not, so moving or retitling a tile costs nothing.
+The poller carries per-term baselines by exact comparison; the dashboard
+adopts the tile rather than rebuilding it, keeping its chart. A term whose
+definition did change starts over, because a stale baseline is worse than an
+absent one -- it is wrong rather than merely empty.
+
+Tiles exist for every screen, not just the one on display, so paging is a
+visibility change. Swipe to a page and its charts are already drawn.
+
 ### Screens
 
 A tile carries a `screen`, and swiping pages between them. Screens are not a

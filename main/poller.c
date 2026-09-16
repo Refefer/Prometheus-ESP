@@ -61,6 +61,7 @@ typedef struct {
 
 /* PSRAM: ~85KB of term state has no business in the internal heap. */
 static watch_rt_t *s_watch;
+static watch_rt_t *s_watch_prev;
 static int         s_watch_n;
 
 static SemaphoreHandle_t s_mux;
@@ -79,8 +80,9 @@ _Static_assert(sizeof(poller_snap_t) < 12 * 1024,
                "stack local -- see publish() and dashboard_tick()");
 
 static void reload_watches(void);
-/* Set by poller_reload() from any task; acted on by the scrape loop. */
+/* Set from any task; acted on by the scrape loop, which owns s_watch. */
 static volatile bool s_reload_req;
+static volatile bool s_wipe_req;
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
@@ -624,19 +626,44 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 void poller_set_endpoint(const char *url, int interval_s)
 {
     if (url == NULL) return;
+    int want = interval_s > 0 ? interval_s : 10;
+
+    /*
+     * Retargeting to the target you are already on is not a retarget.
+     *
+     * The dashboard calls this on every config change, because it cannot know
+     * whether the endpoint was among the things that changed. The wipe below
+     * is right when the target really changed and catastrophic when it did
+     * not: it discards every baseline and every window on the device, so
+     * renaming one tile used to cost every tile its history -- including an
+     * hour-long window that then needs another hour.
+     */
+    if (strcmp(s_url, url) == 0 && s_interval_s == want) return;
+
     if (s_mux && xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
         strncpy(s_url, url, sizeof(s_url) - 1);
         s_url[sizeof(s_url) - 1] = '\0';
-        s_interval_s = interval_s > 0 ? interval_s : 10;
+        s_interval_s = want;
         s_snap.fail_streak = 0;      /* a new target starts with a clean slate */
         xSemaphoreGive(s_mux);
     } else {
         strncpy(s_url, url, sizeof(s_url) - 1);
-        s_interval_s = interval_s > 0 ? interval_s : 10;
+        s_interval_s = want;
     }
     /* The cached connection belongs to the old host. */
     http_drop_slot(0);
-    /* Rates measured against the old target are meaningless for the new one. */
+    /*
+     * Rates measured against the old target are meaningless for the new one,
+     * but the wipe happens on the scrape loop rather than here: this runs on
+     * the LVGL task, and s_watch belongs to the task that reads it.
+     */
+    s_wipe_req = true;
+    ESP_LOGI(TAG, "endpoint set to %s every %ds", url, s_interval_s);
+}
+
+/* Poller task only. See poller_set_endpoint. */
+static void wipe_baselines(void)
+{
     for (int i = 0; i < s_watch_n; i++) {
         watch_rt_t *w = &s_watch[i];
         memset(&w->fmt_state, 0, sizeof(w->fmt_state));
@@ -647,7 +674,6 @@ void poller_set_endpoint(const char *url, int interval_s)
             tm->base_nb = 0;
         }
     }
-    ESP_LOGI(TAG, "endpoint set to %s every %ds", url, s_interval_s);
 }
 
 const char *poller_url(void) { return s_url; }
@@ -682,6 +708,7 @@ static void poller_task(void *arg)
             s_reload_req = false;
             reload_watches();
         }
+        if (s_wipe_req) { s_wipe_req = false; wipe_baselines(); }
 
         if (!wifi_mgr_is_connected()) {
             publish(false, "waiting for wi-fi", 0, NULL, 0);
@@ -835,30 +862,114 @@ static bool selector_has_glob(const prom_label_t *l, uint8_t n)
  * scrape is committing on core 0 is a data race with no symptom until a tile
  * shows another metric's numbers.
  */
+/*
+ * Do these two terms produce the same series of numbers?
+ *
+ * Everything that selects data or shapes it: the selector, how the matched
+ * set is reduced, whether it is a rate, over what span, and which quantile.
+ * Nothing about presentation -- retitling a tile does not invalidate its
+ * baseline, and this is what makes that true.
+ */
+static bool term_def_same(const term_rt_t *a, const term_rt_t *b)
+{
+    return strcmp(a->sel, b->sel) == 0 &&
+           a->reduce   == b->reduce &&
+           a->agg      == b->agg &&
+           a->window_s == b->window_s &&
+           a->q        == b->q;
+}
+
+/*
+ * Moves accumulated state from the outgoing watch list to the incoming one.
+ *
+ * A save rewrites every panel, including the eleven that did not change, and
+ * rebuilding their state from nothing means a counter with no baseline reads
+ * "warming up" and an hour-long window starts its hour again. So state moves
+ * whenever the term that produced it is byte-for-byte the term being built --
+ * same selector, same reduce, agg, window and quantile. Anything else and the
+ * baseline would be about a different series or a different span, which is
+ * worse than starting over, because it is wrong rather than merely absent.
+ *
+ * Terms are matched by definition rather than by position, so removing the
+ * first of three terms does not shift the other two onto each other's
+ * baselines.
+ */
+static void carry_state(watch_rt_t *w, watch_rt_t *old)
+{
+    bool taken[CFG_MAX_TERMS] = { false };
+    bool all = true;
+
+    for (int k = 0; k < w->n_terms; k++) {
+        int from = -1;
+        for (int j = 0; j < old->n_terms; j++) {
+            if (taken[j]) continue;
+            if (term_def_same(&old->terms[j], &w->terms[k])) { from = j; break; }
+        }
+        if (from < 0) { all = false; continue; }
+        taken[from] = true;
+
+        term_rt_t *src = &old->terms[from], *dst = &w->terms[k];
+        dst->rate = src->rate;
+
+        memcpy(dst->win_v, src->win_v, sizeof(dst->win_v));
+        memcpy(dst->win_t, src->win_t, sizeof(dst->win_t));
+        dst->win_n     = src->win_n;
+        dst->win_head  = src->win_head;
+        dst->win_last  = src->win_last;
+        dst->win_valid = src->win_valid;
+
+        memcpy(dst->base_cum, src->base_cum, sizeof(dst->base_cum));
+        memcpy(dst->base_le,  src->base_le,  sizeof(dst->base_le));
+        dst->base_nb = src->base_nb;
+        dst->base_t  = src->base_t;
+    }
+
+    if (!all) return;
+
+    /*
+     * Presentation state, which only makes sense when every term survived:
+     * the prefix hysteresis is about the combined number, and the frozen row
+     * order of a multi tile is about the set the terms produce.
+     */
+    w->fmt_state = old->fmt_state;
+    if (w->multi == old->multi) {
+        memcpy(w->child_key,  old->child_key,  sizeof(w->child_key));
+        memcpy(w->child_rate, old->child_rate, sizeof(w->child_rate));
+        memcpy(w->order,      old->order,      sizeof(w->order));
+        w->n_child   = old->n_child;
+        w->resort_in = old->resort_in;
+    }
+}
+
 static void reload_watches(void)
 {
     const config_t *c = config_get();
 
+    /*
+     * Two lists, swapped rather than one rewritten in place.
+     *
+     * The outgoing list has to stay readable while the new one is built,
+     * because that is where the baselines come from, and it is far too large
+     * to copy onto the calling task's stack -- an earlier version copied a
+     * subset for exactly that reason and lost everything it left behind.
+     * PSRAM is the resource we have.
+     */
     if (s_watch == NULL) {
         s_watch = heap_caps_calloc(POLLER_MAX_WATCH, sizeof(watch_rt_t),
                                    MALLOC_CAP_SPIRAM);
-        if (s_watch == NULL) {
+        s_watch_prev = heap_caps_calloc(POLLER_MAX_WATCH, sizeof(watch_rt_t),
+                                        MALLOC_CAP_SPIRAM);
+        if (s_watch == NULL || s_watch_prev == NULL) {
             ESP_LOGE(TAG, "cannot allocate the watch list");
             s_watch_n = 0;
             return;
         }
     }
 
-    /* Carry only the baselines: copying whole watches would be tens of KB on
-     * whichever stack called us. */
-    struct { uint16_t id; rate_state_t rate[CFG_MAX_TERMS]; fmt_state_t fmt; }
-        prev[POLLER_MAX_WATCH];
+    watch_rt_t *prev = s_watch;
     int prev_n = s_watch_n;
-    for (int i = 0; i < prev_n; i++) {
-        prev[i].id  = s_watch[i].panel_id;
-        prev[i].fmt = s_watch[i].fmt_state;
-        for (int k = 0; k < CFG_MAX_TERMS; k++) prev[i].rate[k] = s_watch[i].terms[k].rate;
-    }
+    s_watch = s_watch_prev;
+    s_watch_prev = prev;
 
     memset(s_watch, 0, sizeof(watch_rt_t) * POLLER_MAX_WATCH);
     s_watch_n = 0;
@@ -891,6 +1002,7 @@ static void reload_watches(void)
             tm->agg      = ct->agg;
             tm->window_s = ct->window_s;
             tm->q        = ct->q;
+            strncpy(tm->sel, ct->sel, sizeof(tm->sel) - 1);
             strncpy(tm->scratch, ct->sel, sizeof(tm->scratch) - 1);
             if (!prom_parse_selector(tm->scratch, tm->scratch, sizeof(tm->scratch),
                                      &tm->name, &tm->name_len,
@@ -918,9 +1030,8 @@ static void reload_watches(void)
         }
 
         for (int j = 0; j < prev_n; j++) {
-            if (prev[j].id != w->panel_id) continue;
-            w->fmt_state = prev[j].fmt;
-            for (int k = 0; k < w->n_terms; k++) w->terms[k].rate = prev[j].rate[k];
+            if (prev[j].panel_id != w->panel_id) continue;
+            carry_state(w, &prev[j]);
             break;
         }
 

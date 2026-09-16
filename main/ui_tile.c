@@ -198,6 +198,22 @@ void tile_update(tile_inst_t *t, const tile_data_t *d)
     if (t->vt->update) t->vt->update(t, d);
 }
 
+void tile_adopt(tile_inst_t *t, const tile_spec_t *spec)
+{
+    if (t == NULL || spec == NULL) return;
+    /* The spec lives in the dashboard's array, which has just been rewritten
+     * underneath this tile, so the pointer is re-seated even when nothing
+     * about the spec's contents changed. */
+    t->spec = spec;
+    lv_obj_set_pos(t->shell, TILE_X(spec->col), TILE_Y(spec->row));
+    label_set_if_changed(t->title_lbl, spec->title ? spec->title : "");
+}
+
+void tile_set_visible(tile_inst_t *t, bool on)
+{
+    if (t && t->shell) hidden_if_changed(t->shell, !on);
+}
+
 void tile_destroy(tile_inst_t *t)
 {
     if (t == NULL) return;
