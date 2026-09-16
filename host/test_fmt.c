@@ -384,6 +384,29 @@ static void test_affixes(void)
     CHECK(numeric == false, "letters fall back to a text face");
 }
 
+static void test_axis(void)
+{
+    printf("axis ticks\n");
+    char out[24];
+    fmt_style_t si = { FMT_SI, "", FMT_PIN_AUTO, false, NULL, NULL };
+    fmt_style_t pinned = { FMT_SI, "", 2, false, NULL, NULL };   /* mega */
+
+    /* The bottom of a pinned axis was reading "0.000 M". */
+    ui_fmt_axis(0.0, &pinned, out, sizeof(out));
+    CHECK(strcmp(out, "0") == 0, "pinned zero tick -> \"%s\"", out);
+    ui_fmt_axis(0.0, &si, out, sizeof(out));
+    CHECK(strcmp(out, "0") == 0, "zero tick -> \"%s\"", out);
+
+    /* Everything else still carries its magnitude. */
+    ui_fmt_axis(2.0e8, &pinned, out, sizeof(out));
+    CHECK(strcmp(out, "200M") == 0, "pinned tick -> \"%s\"", out);  /* terse: no space */
+
+    /* A byte axis steps in 1024s, which is why an axis takes the format at
+     * all rather than always using SI. */
+    CHECK(ui_fmt_magnitude(FMT_RATE_IEC) == FMT_IEC, "byte rate -> IEC axis");
+    CHECK(ui_fmt_magnitude(FMT_RATE_HOUR) == FMT_SI, "hourly rate -> SI axis");
+}
+
 static void test_charset_invariant(void)
 {
     printf("digits-only font charset invariant\n");
@@ -461,6 +484,7 @@ int main(void)
     test_si_iec();
     test_hysteresis();
     test_integral_series();
+    test_axis();
     test_duration();
     test_percent_delta();
     test_nonfinite();

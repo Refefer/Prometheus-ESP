@@ -105,6 +105,7 @@ typedef struct {
      * above a value reading plain units would be worse than no axis. */
     int8_t           scale;
     bool             group;
+    fmt_mode_t       fmt;        /* for the axis's base, not its unit */
 } chart_priv_t;
 
 /* Refill the chart from the tile's history, rescaling if needed. */
@@ -327,7 +328,8 @@ static void chart_tick_cb(lv_event_t *e)
     if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
         float frac = (float)dsc->value / (float)CHART_SPAN;
         float v = p->lo + frac * (p->hi - p->lo);
-        fmt_style_t sy = { FMT_SI, "", p->scale, p->group, NULL, NULL };
+        fmt_style_t sy = { ui_fmt_magnitude(p->fmt), "", p->scale, p->group,
+                           NULL, NULL };
         ui_fmt_axis(v, &sy, dsc->text, (size_t)dsc->text_length);
     } else {
         dsc->text[0] = '\0';      /* x ticks are handled by the caption */
@@ -381,6 +383,8 @@ static void chartt_update(tile_inst_t *t, const tile_data_t *d)
     chart_priv_t *p = t->priv;
     p->scale = d->scale;
     p->group = d->group;
+    p->fmt   = d->fmt;
+
     const char *txt = d->valid ? d->num : "--";
     const lv_font_t *f = fit_font(d->numeric_only ? FONT_NUM_L : FONT_XL, txt,
                                   d->numeric_only,
@@ -493,7 +497,8 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     }
 
     char a[24], b[24];
-    fmt_style_t rsy = { FMT_SI, "", d->scale, d->group, NULL, NULL };
+    fmt_style_t rsy = { ui_fmt_magnitude(d->fmt), "", d->scale, d->group,
+                        NULL, NULL };
     /* Same reasoning as the gauge's caption: a range describing whole numbers
      * should be written in whole numbers. */
     fmt_state_t rs = { 0 };

@@ -168,6 +168,13 @@ rebuild, keyed by panel id and data fingerprint, and the tiles repaint from
 the snapshot already in hand rather than waiting for the next scrape. The same
 carry covers a change of widget kind, which the adopt path cannot handle.
 
+A panel's published value is the **displayed** quantity in every format --
+a 0..1 ratio as 0..100, a per-second rate as per-hour where the format says
+so. Everything that reads it (charts, gauge and bar ranges, the peak) wants
+what the tile says, not what the formatter will later turn it into. Axis ticks
+and range endpoints are then written as bare magnitudes in the right base:
+no unit, no `/s`, but 1024s for a byte panel.
+
 `vmin`/`vmax` are in the **displayed** domain -- a percent panel reads 0..100
 whatever ratio feeds it. `null` means auto: 100 for a percent, and otherwise
 **the largest value seen so far**. That is the answer for a gauge whose full

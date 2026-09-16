@@ -169,6 +169,19 @@ const char *ui_fmt_prefix_name(fmt_mode_t mode, int8_t e);
  */
 bool ui_fmt_digits_safe(const char *s);
 
+/*
+ * The bare-magnitude mode for a format: what an axis tick or a range endpoint
+ * should be written in.
+ *
+ * Those describe a scale rather than a reading, so they carry no unit and no
+ * "/s" -- but they must use the right base, since a byte axis stepping in
+ * thousands next to a value in KiB is simply wrong. They must also not
+ * re-apply a multiplier: the published value is already the displayed
+ * quantity, so formatting it as a percent or a per-hour rate a second time
+ * would scale it twice.
+ */
+fmt_mode_t ui_fmt_magnitude(fmt_mode_t m);
+
 /* Seconds -> exactly two units, never three. */
 void ui_fmt_duration(double seconds, char *out, size_t cap);
 

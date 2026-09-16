@@ -623,8 +623,20 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
             ui_fmt_value(shown, &vsy, &w->fmt_state,
                          m->num, sizeof(m->num),
                          m->suffix, sizeof(m->suffix), &numeric);
-            m->value = (w->fmt == FMT_PCT_01) ? (float)(shown * 100.0)
-                                              : (float)shown;
+            /*
+             * The DISPLAYED quantity, in every mode.
+             *
+             * Percent was already converted here and a per-hour rate was not,
+             * so a chart of an hourly panel plotted per-second numbers while
+             * the headline above it read per-hour -- the same series, an axis
+             * 3600x out. Anything reading m->value (charts, gauge and bar
+             * ranges, the peak) wants what the tile says, not what the
+             * formatter will later turn it into.
+             */
+            double disp = shown;
+            if (w->fmt == FMT_PCT_01)         disp = shown * 100.0;
+            else if (w->fmt == FMT_RATE_HOUR) disp = shown * 3600.0;
+            m->value = (float)disp;
             if (isfinite(m->value) && m->value > w->peak) w->peak = m->value;
             m->numeric_only = numeric;
             m->valid = true;

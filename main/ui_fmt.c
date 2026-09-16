@@ -114,6 +114,11 @@ static int pick_exp(double v, double base, int lo, int hi,
     return e;
 }
 
+fmt_mode_t ui_fmt_magnitude(fmt_mode_t m)
+{
+    return (m == FMT_IEC || m == FMT_RATE_IEC) ? FMT_IEC : FMT_SI;
+}
+
 const char *ui_fmt_prefix_name(fmt_mode_t mode, int8_t e)
 {
     switch (mode) {
@@ -379,6 +384,10 @@ void ui_fmt_axis(double v, const fmt_style_t *sy, char *out, size_t cap)
     const fmt_mode_t mode = sy->mode;
     out[0] = '\0';
     if (!isfinite(v)) { safe_copy(out, cap, ""); return; }
+    /* Zero is zero at any scale. A pinned prefix would otherwise render the
+     * bottom of an axis as "0.000 M", which is three characters of noise in
+     * the four a tick can spare. */
+    if (v == 0.0) { safe_copy(out, cap, "0"); return; }
 
     /* Axis ticks get no hysteresis (they are recomputed wholesale with the
      * range) and are kept terse: a 4-char tick is all a 185px tile can spare. */
