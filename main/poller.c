@@ -50,6 +50,9 @@ typedef struct {
      * appearing or disappearing between scrapes. */
     char         child_key[POLLER_MAX_CHILDREN][POLLER_CHILD_LABEL];
     rate_state_t child_rate[POLLER_MAX_CHILDREN];
+    /* One per row, so a multi panel's rows honour the same window its single
+     * value would have. */
+    win_ring_t   child_win[POLLER_MAX_CHILDREN];
     uint8_t      n_child;
     uint8_t      order[POLLER_MAX_CHILDREN];
     uint8_t      resort_in;
@@ -294,6 +297,56 @@ static bool feed_chunk(void *ctx, const char *data, size_t len)
 /* ------------------------------------------------------------- publishing */
 
 /*
+ * One step of a windowed rate. Returns false while there is not yet a span
+ * worth dividing by.
+ *
+ * Baselines are stored at the window's own spacing rather than once per poll:
+ * the ring holds TERM_WIN_MAX of them, so storing every poll would reach back
+ * only poll_interval * 24 and a one-hour window would silently have been a
+ * two-minute one. Spacing them at window_s/(TERM_WIN_MAX-1) makes the ring
+ * span whatever was asked for, at the cost of resolving the window's start to
+ * within one spacing. The current value is never affected -- only the
+ * baseline comes from the ring -- and for short windows the spacing lands
+ * below the poll interval, so every poll is stored exactly as before.
+ */
+static bool win_step(win_ring_t *w, double v, int64_t t, uint16_t window_s,
+                     float *out, bool *restarted)
+{
+    uint8_t newest = (uint8_t)((w->head + TERM_WIN_MAX - 1) % TERM_WIN_MAX);
+    if (w->n > 0 && v < w->v[newest]) {
+        w->n = 0;
+        w->valid = false;
+        if (restarted) *restarted = true;
+    }
+
+    int64_t spacing = ((int64_t)window_s * 1000) / (TERM_WIN_MAX - 1);
+    if (w->n == 0 || (t - w->t[newest]) >= spacing) {
+        w->v[w->head] = v;
+        w->t[w->head] = t;
+        w->head = (uint8_t)((w->head + 1) % TERM_WIN_MAX);
+        if (w->n < TERM_WIN_MAX) w->n++;
+    }
+
+    int64_t cutoff = t - (int64_t)window_s * 1000;
+    int best = -1;
+    for (int k = 0; k < w->n; k++) {
+        uint8_t idx = (uint8_t)((w->head + TERM_WIN_MAX - 1 - k) % TERM_WIN_MAX);
+        best = idx;
+        if (w->t[idx] <= cutoff) break;
+    }
+    if (best >= 0) {
+        int64_t dt = t - w->t[best];
+        /* Needs a real span before the number means anything. */
+        if (dt >= 2000) {
+            w->last  = (float)((v - w->v[best]) * 1000.0 / (double)dt);
+            w->valid = true;
+        }
+    }
+    if (w->valid) { *out = w->last; return true; }
+    return false;
+}
+
+/*
  * Reduce one term to a single number, applying its aggregation.
  *
  * Each term is rated independently, so rate(sum(x)) is what happens here --
@@ -358,54 +411,8 @@ static double term_value(term_rt_t *tm, int64_t t, bool *warming, bool *restarte
     if (tm->agg != AGG_RATE) return v;
 
     if (tm->window_s > 0) {
-        /* Windowed rate: difference against the oldest sample still inside
-         * the window, so a counter that only updates on its exporter's log
-         * interval reads steadily instead of alternating zero and spike. */
-        uint8_t newest = (uint8_t)((tm->win_head + TERM_WIN_MAX - 1) % TERM_WIN_MAX);
-        if (tm->win_n > 0 && v < tm->win_v[newest]) {
-            tm->win_n = 0; tm->win_valid = false;
-            *restarted = true;
-        }
-
-        /*
-         * Stored at the window's own spacing, not once per poll.
-         *
-         * The ring holds baselines, and there are TERM_WIN_MAX of them. Store
-         * every poll and the ring reaches back poll_interval * 24 -- about
-         * two minutes here -- so asking for a one-hour window would silently
-         * have given a two-minute one under an hourly label. Spacing the
-         * stores at window_s / (TERM_WIN_MAX - 1) makes the ring span any
-         * window asked for, at the cost of resolving the window's start to
-         * within one spacing. The current value is never affected: only the
-         * baseline comes from the ring.
-         *
-         * For the short windows this already handled, the spacing lands below
-         * the poll interval and every poll is stored exactly as before.
-         */
-        int64_t spacing = ((int64_t)tm->window_s * 1000) / (TERM_WIN_MAX - 1);
-        if (tm->win_n == 0 || (t - tm->win_t[newest]) >= spacing) {
-            tm->win_v[tm->win_head] = v;
-            tm->win_t[tm->win_head] = t;
-            tm->win_head = (uint8_t)((tm->win_head + 1) % TERM_WIN_MAX);
-            if (tm->win_n < TERM_WIN_MAX) tm->win_n++;
-        }
-
-        int64_t cutoff = t - (int64_t)tm->window_s * 1000;
-        int best = -1;
-        for (int k = 0; k < tm->win_n; k++) {
-            uint8_t idx = (uint8_t)((tm->win_head + TERM_WIN_MAX - 1 - k) % TERM_WIN_MAX);
-            best = idx;
-            if (tm->win_t[idx] <= cutoff) break;
-        }
-        if (best >= 0) {
-            int64_t dt = t - tm->win_t[best];
-            /* Needs a real span before the number means anything. */
-            if (dt >= 2000) {
-                tm->win_last  = (float)((v - tm->win_v[best]) * 1000.0 / (double)dt);
-                tm->win_valid = true;
-            }
-        }
-        if (tm->win_valid) return tm->win_last;
+        float r = 0;
+        if (win_step(&tm->win, v, t, tm->window_s, &r, restarted)) return r;
         *warming = true;
         return NAN;
     }
@@ -471,7 +478,16 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
                 double cv = NAN;
                 if (t0->agg == AGG_RATE && slot >= 0) {
                     float r = 0;
-                    if (prom_rate_step(&w->child_rate[slot],
+                    /*
+                     * The same window the panel asks for. This used to be a
+                     * plain per-poll rate whatever window_s said, which on a
+                     * counter that steps at its exporter's log interval reads
+                     * as a spike then exactly zero, over and over.
+                     */
+                    if (t0->window_s > 0) {
+                        if (win_step(&w->child_win[slot], w->sc_child_value[k],
+                                     t, t0->window_s, &r, NULL)) cv = r;
+                    } else if (prom_rate_step(&w->child_rate[slot],
                                        prom_num(w->sc_child_value[k]), t,
                                        (int64_t)s_interval_s * 3000, &r) == RATE_OK) {
                         cv = r;
@@ -673,10 +689,11 @@ static void wipe_baselines(void)
     for (int i = 0; i < s_watch_n; i++) {
         watch_rt_t *w = &s_watch[i];
         memset(&w->fmt_state, 0, sizeof(w->fmt_state));
+        memset(w->child_win, 0, sizeof(w->child_win));
         for (int k = 0; k < w->n_terms; k++) {
             term_rt_t *tm = &w->terms[k];
             memset(&tm->rate, 0, sizeof(tm->rate));
-            tm->win_n = tm->win_head = 0; tm->win_valid = false;
+            memset(&tm->win, 0, sizeof(tm->win));
             tm->base_nb = 0;
         }
     }
@@ -917,12 +934,7 @@ static void carry_state(watch_rt_t *w, watch_rt_t *old)
         term_rt_t *src = &old->terms[from], *dst = &w->terms[k];
         dst->rate = src->rate;
 
-        memcpy(dst->win_v, src->win_v, sizeof(dst->win_v));
-        memcpy(dst->win_t, src->win_t, sizeof(dst->win_t));
-        dst->win_n     = src->win_n;
-        dst->win_head  = src->win_head;
-        dst->win_last  = src->win_last;
-        dst->win_valid = src->win_valid;
+        dst->win = src->win;
 
         memcpy(dst->base_cum, src->base_cum, sizeof(dst->base_cum));
         memcpy(dst->base_le,  src->base_le,  sizeof(dst->base_le));
@@ -941,6 +953,7 @@ static void carry_state(watch_rt_t *w, watch_rt_t *old)
     if (w->multi == old->multi) {
         memcpy(w->child_key,  old->child_key,  sizeof(w->child_key));
         memcpy(w->child_rate, old->child_rate, sizeof(w->child_rate));
+        memcpy(w->child_win,  old->child_win,  sizeof(w->child_win));
         memcpy(w->order,      old->order,      sizeof(w->order));
         w->n_child   = old->n_child;
         w->resort_in = old->resort_in;

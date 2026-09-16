@@ -20,6 +20,24 @@
 /* Samples in the windowed-rate ring. */
 #define TERM_WIN_MAX     24
 
+/*
+ * A windowed-rate ring: baselines spaced so that TERM_WIN_MAX of them span
+ * whatever window was asked for.
+ *
+ * Its own type because there are two users -- a term's single value, and each
+ * row of a multi-series panel. They were not always both: the multi rows used
+ * a per-poll rate and silently ignored the window the panel was configured
+ * with, which on a counter that only updates at its exporter's log interval
+ * alternates between a spike and exactly zero.
+ */
+typedef struct {
+    double  v[TERM_WIN_MAX];
+    int64_t t[TERM_WIN_MAX];
+    uint8_t n, head;
+    float   last;
+    bool    valid;
+} win_ring_t;
+
 typedef struct {
     /*
      * The selector exactly as configured.
@@ -63,11 +81,7 @@ typedef struct {
      * panel was edited means every save costs every tile its history.
      */
     rate_state_t rate;
-    double       win_v[TERM_WIN_MAX];
-    int64_t      win_t[TERM_WIN_MAX];
-    uint8_t      win_n, win_head;
-    float        win_last;
-    bool         win_valid;
+    win_ring_t   win;
     double       base_cum[TERM_MAX_BUCKETS];
     double       base_le[TERM_MAX_BUCKETS];
     int          base_nb;

@@ -100,6 +100,9 @@ settings, labelled from whichever ladder that tile's format uses.
 A pin applies to the axis and the quantiles as well as the value, so nothing
 on a tile can disagree with the number above it.
 
+A `multi` panel's rows use the same window as its single value would. Both go
+through one ring, so the two cannot drift apart again.
+
 `panel.group` turns on thousands separators -- `17,321` rather than `17321`.
 It only bites once a number is four digits long, which in practice means
 alongside a pin, since an auto prefix keeps it to three. The comma is in the
