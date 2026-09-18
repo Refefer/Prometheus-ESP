@@ -9,6 +9,26 @@ same configuration is readable and pushable as JSON, and the device describes
 its own format, so a script or an LLM agent can build a dashboard for it
 without ever having seen one.
 
+## Screenshots
+
+Taken from the device itself over `GET /screenshot`, so they are the panel's
+own pixels rather than a photograph of a backlit screen. The endpoint here is
+an sglang inference server on the same LAN.
+
+| | |
+|---|---|
+| ![dashboard](docs/img/dashboard.png) | ![tile settings](docs/img/tile-settings.png) |
+| The dashboard: a 4x3 grid of tiles, one screen of several | A tile's settings: widget, span, position, title, units |
+| ![metric browser](docs/img/browser.png) | ![endpoint](docs/img/endpoint.png) |
+| The metric browser, listing what the endpoint exposes | The endpoint editor with its Test button |
+| ![daylight theme](docs/img/theme-daylight.png) | ![nord theme](docs/img/theme-nord.png) |
+| The same screen in Daylight | and in Nord |
+
+```sh
+curl -H "X-Auth: $TOK" http://$D/screenshot > panel.bmp     # or
+tools/screenshot.py --host $D --token $TOK panel.png        # needs Pillow
+```
+
 ## What it does
 
 **On the glass**
@@ -68,26 +88,6 @@ without ever having seen one.
 Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 [waveshare-ips-esp32](../waveshare-ips-esp32), which extracted it from
 [theqkash/esp32flight](https://github.com/theqkash/esp32flight) (MIT).
-
-## Screenshots
-
-Taken from the device itself over `GET /screenshot`, so they are the panel's
-own pixels rather than a photograph of a backlit screen. The endpoint here is
-an sglang inference server on the same LAN.
-
-| | |
-|---|---|
-| ![dashboard](docs/img/dashboard.png) | ![tile settings](docs/img/tile-settings.png) |
-| The dashboard: a 4x3 grid of tiles, one screen of several | A tile's settings: widget, span, position, title, units |
-| ![metric browser](docs/img/browser.png) | ![endpoint](docs/img/endpoint.png) |
-| The metric browser, listing what the endpoint exposes | The endpoint editor with its Test button |
-| ![daylight theme](docs/img/theme-daylight.png) | ![nord theme](docs/img/theme-nord.png) |
-| The same screen in Daylight | and in Nord |
-
-```sh
-curl -H "X-Auth: $TOK" http://$D/screenshot > panel.bmp     # or
-tools/screenshot.py --host $D --token $TOK panel.png        # needs Pillow
-```
 
 ## Hardware
 
