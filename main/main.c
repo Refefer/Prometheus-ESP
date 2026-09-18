@@ -680,8 +680,15 @@ static void build_dashboard(void)
     s_ftr_left = make_label(scr, FONT_XS, COL_DIM);
     lv_obj_set_pos(s_ftr_left, GRID_MX, ftext_y);
 
+    /* Right-aligned to the margin, so the last figure is the one that is
+     * always whole. The page dots are centred, so this has to start past
+     * where six screens' worth of them would end. */
+    const lv_coord_t fr_w = 200;
     s_ftr_right = make_label(scr, FONT_XS, COL_DIM);
-    lv_obj_set_pos(s_ftr_right, SCR_W - 330, ftext_y);
+    lv_obj_set_pos(s_ftr_right, SCR_W - GRID_MX - fr_w, ftext_y);
+    lv_obj_set_width(s_ftr_right, fr_w);
+    lv_label_set_long_mode(s_ftr_right, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_ftr_right, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
 
@@ -901,11 +908,7 @@ static void dashboard_tick(lv_timer_t *timer)
         wifi_mgr_info(NULL, 0, &rssi);
         signal_set_level(s_hdr_sig, wifi_level(rssi));
 
-        label_set_fmt_if_changed(s_ftr_right,
-                                 "%u samples  %u KB  %u ms   SRAM %uK  PSRAM %uK",
-                                 (unsigned)snap.samples,
-                                 (unsigned)(snap.body_bytes / 1024),
-                                 (unsigned)snap.latency_ms,
+        label_set_fmt_if_changed(s_ftr_right, "SRAM %uK  PSRAM %uK",
                                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
@@ -915,8 +918,15 @@ static void dashboard_tick(lv_timer_t *timer)
      * snapshot. */
     if (snap.last_ok_ms > 0) {
         int age = (int)((esp_timer_get_time() / 1000 - snap.last_ok_ms) / 1000);
-        label_set_fmt_if_changed(s_ftr_left, "updated %ds ago   %s",
-                                 age, snap.status);
+        /* The scrape figures live here, beside the status they describe,
+         * rather than on the right where they crowded the memory readout
+         * off the edge. */
+        label_set_fmt_if_changed(s_ftr_left,
+                                 "updated %ds ago   %s   %u samples  %u KB  %u ms",
+                                 age, snap.status,
+                                 (unsigned)snap.samples,
+                                 (unsigned)(snap.body_bytes / 1024),
+                                 (unsigned)snap.latency_ms);
     } else {
         label_set_fmt_if_changed(s_ftr_left, "%s", snap.status);
     }

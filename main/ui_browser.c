@@ -654,7 +654,7 @@ static void render_rows(void)
     int used = cells_used();
     int total = GRID_COLS * GRID_ROWS;
     if (drilled) {
-        label_set_fmt_if_changed(s_count, "%.40s   %d series   %d/%d cells",
+        label_set_fmt_if_changed(s_count, "%.24s   %d series   %d/%d cells",
                                  s_cat[s_drill].name, s_filt_n, used, total);
     } else {
         label_set_fmt_if_changed(s_count, "%d shown   %d selected   %d/%d cells",
@@ -844,8 +844,15 @@ static void browser_build(const char *heading)
     s_status = make_label(s_root, FONT_S, COL_DIM);
     lv_obj_set_pos(s_status, 130, 14);
 
+    /* Right-aligned against the Done button: the cells figure is the one
+     * that matters, so it is the one that is never cut. */
+    const lv_coord_t count_x = 350;
+    const lv_coord_t count_w = SCR_W - 130 - GRID_MX - 12 - count_x;
     s_count = make_label(s_root, FONT_S, COL_DIM);
-    lv_obj_set_pos(s_count, 430, 14);
+    lv_obj_set_pos(s_count, count_x, 14);
+    lv_obj_set_width(s_count, count_w);
+    lv_label_set_long_mode(s_count, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_count, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *done = make_btn_accent(s_root,
                                      (s_pick_mode || s_select_mode)

@@ -97,6 +97,13 @@ static void nice_range(const float *v, int n, float *lo_out, float *hi_out)
 typedef struct {
     lv_obj_t        *chart;
     lv_chart_series_t *ser;
+    /* Axis geometry, for the chart tile only (the sparkline has no axis).
+     * The gutter is re-fitted to the widest tick label whenever the range
+     * changes, so "100,000" gets the room it needs and "500" does not pay
+     * for it. */
+    lv_obj_t        *cap;
+    lv_coord_t       w, h, gutter;
+    bool             axis;
     lv_obj_t        *val, *suf;
     float            lo, hi;
     int              stale_range;   /* samples the range has been too wide */
@@ -107,6 +114,42 @@ typedef struct {
     bool             group;
     fmt_mode_t       fmt;        /* for the axis's base, not its unit */
 } chart_priv_t;
+
+#define CHART_TOP 68      /* the value occupies the top of a chart tile */
+#define CAP_H     16      /* the "last 10 min" caption under the plot */
+
+/*
+ * Size the axis gutter to the labels it will carry. The three tick labels
+ * are known once the range is: format them the way chart_tick_cb will and
+ * measure. A fixed gutter was 44px, which "100,000" in the small face does
+ * not fit -- the leading digit fell off the tile's edge.
+ */
+static void chart_fit_axis(chart_priv_t *p)
+{
+    lv_coord_t widest = 0;
+    for (int i = 0; i < 3; i++) {
+        char txt[24];
+        float v = p->lo + (p->hi - p->lo) * (float)i / 2.0f;
+        fmt_style_t sy = { ui_fmt_magnitude(p->fmt), "", p->scale, p->group,
+                           NULL, NULL };
+        ui_fmt_axis(v, &sy, txt, sizeof(txt));
+        lv_coord_t tw = lv_txt_get_width(txt, (uint32_t)strlen(txt), FONT_XS,
+                                         0, LV_TEXT_FLAG_NONE);
+        if (tw > widest) widest = tw;
+    }
+    /* Label sits label_gap left of the tick; 4px more keeps it off the edge. */
+    lv_coord_t gutter = widest
+                      + lv_obj_get_style_pad_left(p->chart, LV_PART_TICKS) + 4;
+    if (gutter < 28) gutter = 28;
+    if (gutter == p->gutter) return;
+    p->gutter = gutter;
+
+    lv_obj_set_size(p->chart, p->w - gutter - 4, p->h - CHART_TOP - CAP_H);
+    lv_obj_set_pos(p->chart, gutter, CHART_TOP);
+    lv_chart_set_axis_tick(p->chart, LV_CHART_AXIS_PRIMARY_Y,
+                           0, 0, 3, 1, true, gutter);
+    lv_obj_set_x(p->cap, gutter);
+}
 
 /* Refill the chart from the tile's history, rescaling if needed. */
 static void chart_sync(tile_inst_t *t, chart_priv_t *p, int points)
@@ -135,6 +178,7 @@ static void chart_sync(tile_inst_t *t, chart_priv_t *p, int points)
     if (outside || have <= 0 || p->stale_range > 10) {
         p->lo = lo; p->hi = hi; p->stale_range = 0;
         lv_chart_set_range(p->chart, LV_CHART_AXIS_PRIMARY_Y, 0, CHART_SPAN);
+        if (p->axis) chart_fit_axis(p);
     }
 
     float span = p->hi - p->lo;
@@ -362,20 +406,23 @@ static void chartt_build(tile_inst_t *t, lv_obj_t *body)
      * Positioning the caption at h-4 put its TOP 4px from the bottom edge, so
      * its whole height overflowed the body -- which clips, so it vanished.
      */
-    const lv_coord_t CHART_TOP = 68;
-    const lv_coord_t CAP_H     = 16;
     make_chart(t, body, p, TILE_HIST_MAX, true);
-    lv_obj_set_size(p->chart, w - 48, h - CHART_TOP - CAP_H);
-    lv_obj_set_pos(p->chart, 44, CHART_TOP);
-    lv_chart_set_axis_tick(p->chart, LV_CHART_AXIS_PRIMARY_Y,
-                           0, 0, 3, 1, true, 44);
     lv_obj_set_style_text_font(p->chart, FONT_XS, LV_PART_TICKS);
     lv_obj_set_style_text_color(p->chart, COL_DIM, LV_PART_TICKS);
     lv_obj_add_event_cb(p->chart, chart_tick_cb, LV_EVENT_DRAW_PART_BEGIN, t);
 
-    lv_obj_t *cap = make_label(body, FONT_XS, COL_DIM);
-    lv_label_set_text(cap, "last 10 min");
-    lv_obj_set_pos(cap, 44, h - CAP_H + 1);
+    p->cap = make_label(body, FONT_XS, COL_DIM);
+    lv_label_set_text(p->cap, "last 10 min");
+    lv_obj_set_pos(p->cap, 0, h - CAP_H + 1);
+
+    /* Placed with a starting gutter; the first range fits it properly. */
+    p->axis = true;
+    p->w = w;
+    p->h = h;
+    p->gutter = 0;
+    p->lo = 0;
+    p->hi = 1;
+    chart_fit_axis(p);
 }
 
 static void chartt_update(tile_inst_t *t, const tile_data_t *d)
