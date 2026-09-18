@@ -1,8 +1,8 @@
 # prometheus-esp32
 
 A generic **Prometheus metrics panel** for the **Waveshare ESP32-S3-Touch-LCD-7**
-(plain, 800x480, capacitive touch). Point it at any metrics endpoint, pick the
-metrics you care about on the touchscreen, hang it on a wall.
+(the 800x480 model, capacitive touch). Point it at any metrics endpoint, pick
+the metrics you care about on the touchscreen, hang it on a wall.
 
 - Reads **raw `/metrics`** text exposition from any exporter, and a
   **Prometheus server's HTTP API** (`/api/v1/query`, `/api/v1/query_range`).
@@ -16,6 +16,121 @@ metrics you care about on the touchscreen, hang it on a wall.
 Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 [waveshare-ips-esp32](../waveshare-ips-esp32), which extracted it from
 [theqkash/esp32flight](https://github.com/theqkash/esp32flight) (MIT).
+
+## Screenshots
+
+Taken from the device itself over `GET /screenshot`, so they are the panel's
+own pixels rather than a photograph of a backlit screen. The endpoint here is
+an sglang inference server on the same LAN.
+
+| | |
+|---|---|
+| ![dashboard](docs/img/dashboard.png) | ![tile settings](docs/img/tile-settings.png) |
+| The dashboard: a 4x3 grid of tiles, one screen of several | A tile's settings: widget, span, position, title, units |
+| ![metric browser](docs/img/browser.png) | ![endpoint](docs/img/endpoint.png) |
+| The metric browser, listing what the endpoint exposes | The endpoint editor with its Test button |
+| ![daylight theme](docs/img/theme-daylight.png) | ![nord theme](docs/img/theme-nord.png) |
+| The same screen in Daylight | and in Nord |
+
+```sh
+curl -H "X-Auth: $TOK" http://$D/screenshot > panel.bmp     # or
+tools/screenshot.py --host $D --token $TOK panel.png        # needs Pillow
+```
+
+## Hardware
+
+One board, no wiring. Everything the firmware needs is on it.
+
+| | |
+|---|---|
+| Board | Waveshare **ESP32-S3-Touch-LCD-7**, the 800x480 model. The other sizes in that family carry different panels and timings and have not been tried. |
+| Module | ESP32-S3-WROOM-1 **N16R8**: dual-core Xtensa LX7 at 240 MHz, **16 MB** quad-SPI flash, **8 MB** octal PSRAM. Both buses run at 80 MHz. |
+| Display | 7" IPS, 800x480, driven directly by the S3's RGB peripheral over a **16-bit parallel bus** (RGB565) at a 16 MHz pixel clock, ~31 Hz refresh. There is no display controller chip; the two framebuffers live in PSRAM and the chip scans them out itself. |
+| Touch | **GT911** capacitive controller on I2C (address 0x5D), up to five points; the firmware uses one. |
+| Expander | **CH422G** I2C IO expander. The LCD reset, touch reset and backlight lines all hang off it, not off the S3. |
+| Console | The chip's **native USB** (serial/JTAG) on the USB-C port, `303a:1001`. No UART bridge. |
+| Power | 5 V over the same USB-C port. |
+| Unused | The SD slot, RS485 and CAN transceivers, the sensor header and the external I2C terminal are not touched. |
+
+The pin map, from `main/waveshare_rgb_lcd_port.h`:
+
+| Signal | GPIO | | Signal | GPIO |
+|---|---|---|---|---|
+| I2C SCL / SDA | 9 / 8 | | RGB VSYNC / HSYNC | 3 / 46 |
+| Touch INT | 4 | | RGB DE / PCLK | 5 / 7 |
+| RGB B0..B4 (DATA0-4) | 14 38 18 17 10 | | RGB G0..G5 (DATA5-10) | 39 0 45 48 47 21 |
+| RGB R0..R4 (DATA11-15) | 1 2 42 41 40 | | | |
+
+On the expander: EXIO1 is touch reset, **EXIO2 is the backlight**, EXIO3 is
+LCD reset, EXIO4 the SD chip select, and EXIO5 routes the USB-C port to
+either native USB (low) or the CAN transceiver.
+
+Two consequences of that wiring shape the firmware:
+
+- The backlight is a plain **on/off** line on the expander. There is no PWM
+  pin and no PWM peripheral behind it, so there is no brightness slider.
+  Instead there are **six themes**, and a blackout schedule that turns the
+  panel off entirely.
+- **GPIO0 is a data line** (green bit 1). The BOOT button shares it, so the
+  button cannot be read once the display is running. Recovery from a bad
+  config or a wedged flash is `idf.py erase-flash` over USB; there is no
+  on-device escape hatch.
+
+## Getting started
+
+You need the board, a USB-C cable, **ESP-IDF 5.5.x** on the host, and
+something on your network that serves Prometheus metrics. If you do not have
+an exporter handy yet, `tools/fake_exporter.py` is one.
+
+**1. Build and flash.** Plug the board in; it shows up as `/dev/ttyACM0`.
+
+```sh
+. $IDF_PATH/export.sh
+idf.py set-target esp32s3          # first time only
+idf.py build
+idf.py -p /dev/ttyACM0 flash
+```
+
+`flash` writes the bootloader, the partition table (16 MB: dual OTA slots and
+two LittleFS partitions) and the app. LVGL, the touch driver and LittleFS are
+fetched by the component manager during the first build.
+
+**2. Join Wi-Fi.** First boot lands in the setup wizard: pick a network from
+the scan, type the password on the on-screen keyboard, Join. The panel
+remembers it. The wizard is reachable again later from the settings sheet.
+
+**3. Point it at an exporter.** Tap the **gear**. Enter the metrics URL, for
+example `http://192.168.1.20:9100/metrics` for node_exporter, and press
+**Test**. Test tells a wrong host from a wrong path from "that is a web page,
+not metrics", so fix what it names and save.
+
+**4. Put something on the screen.** Tap a **`+`** on any empty cell. The metric
+browser lists everything the endpoint exposes; tick one. The widget, units and
+aggregation are inferred from the metric's name and type -- a counter becomes
+a rate, `_bytes` becomes KiB/MiB, `_seconds` becomes a duration -- so most
+tiles need nothing more. Tap the tile afterwards to change any of that, or to
+move and resize it.
+
+**5. Optional: script it.** The panel serves its configuration over HTTP.
+The token is on the device under the gear, as **Config push token**.
+
+```sh
+D=192.168.1.50                              # the address is in the settings sheet
+curl http://$D/status                       # no token needed
+curl -H "X-Auth: $TOK" http://$D/config     # what is on the glass, as JSON
+```
+
+The rest of this document is about what that JSON can say.
+
+**Trying it without an exporter.** On the machine you built from:
+
+```sh
+python3 tools/fake_exporter.py --port 9100
+```
+
+and give the panel `http://<that machine>:9100/metrics`. It serves counters
+that climb, a gauge that wanders and a histogram that fills, which is enough
+to see every widget do something.
 
 ## Status
 
@@ -35,10 +150,12 @@ which metrics appear is compiled in.
 | Renderers: stat, sparkline, chart, bar, gauge, status, histogram, multi | done |
 | Derived tiles: share / ratio / difference / sum of two series | done |
 | Config persists across power loss (atomic writes) | done |
+| Multiple screens, swipe between them | done |
+| Layouts saved by name, switched from the header | done |
+| Screenshot of the glass over HTTP | done |
 
-Not built yet: multiple screens and swipe, editable warn/crit thresholds,
-SUMMARY and RATE renderers, the PromQL client, OTA, history that survives a
-reboot.
+Not built yet: editable warn/crit thresholds, SUMMARY and RATE renderers, the
+PromQL client, OTA, history that survives a reboot.
 
 ## Using it
 
@@ -322,14 +439,7 @@ operands go through the panel's aggregation first, so on counters this is a
 ratio of RATES, matching what `rate(a)/rate(a+b)` means rather than a lifetime
 average that stops moving.
 
-## Build and flash
-
-```sh
-. ~/src/esp-idf/export.sh          # ESP-IDF 5.5.x
-idf.py set-target esp32s3          # first time only
-idf.py build
-idf.py -p /dev/ttyACM0 flash
-```
+## The serial console
 
 The console is the chip's **native USB**, which re-enumerates on reset -- so
 anything printed during boot is gone before a host can attach. That is why the
@@ -451,12 +561,3 @@ partitions.csv       16 MB: dual OTA slots + config/data LittleFS
 - `PROM_LINE_MAX` in `components/prom/include/prom_types.h` -- 4 KB is 2x the
   worst realistic exposition line. Lower it and watch `err_too_long` climb on a
   cAdvisor corpus.
-
-## Hardware notes
-
-- Backlight is a plain **on/off** line on the CH422G expander (EXIO2); there is
-  no PWM pin and no PWM peripheral. Hence **themes rather than a brightness
-  slider**, plus a true blackout schedule.
-- **GPIO0 is wired as RGB `DATA6`**, so the BOOT button cannot be read at
-  runtime. There is no hardware escape hatch -- Safe Mode is entered by holding
-  the glass for 10 s within 20 s of boot.

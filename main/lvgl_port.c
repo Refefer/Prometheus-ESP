@@ -22,6 +22,9 @@
 static const char *TAG = "lv_port";
 static SemaphoreHandle_t lvgl_mux;
 static TaskHandle_t lvgl_task_handle = NULL;
+/* Whatever was last handed to scanout. Recorded at the flip rather than
+ * derived from LVGL's buf_act, so it is right in both buffer strategies. */
+static const uint16_t *s_front = NULL;
 
 #if LVGL_PORT_AVOID_TEAR_ENABLE
 
@@ -40,6 +43,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
     if (lv_disp_flush_is_last(drv)) {
         /* Switch the current RGB frame buffer to `color_map` */
         esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
+        s_front = (const uint16_t *)color_map;
 
         /* Wait for the last frame buffer to complete transmission */
         ulTaskNotifyValueClear(NULL, ULONG_MAX);
@@ -88,6 +92,10 @@ static lv_disp_t *display_init(esp_lcd_panel_handle_t panel_handle)
     buffer_size = LVGL_PORT_H_RES * LVGL_PORT_BUFFER_HEIGHT;
     buf1 = heap_caps_malloc(buffer_size * sizeof(lv_color_t), LVGL_PORT_BUFFER_MALLOC_CAPS);
     assert(buf1);
+    /* One framebuffer, always on screen; the strips are copied into it. */
+    void *fb = NULL;
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 1, &fb));
+    s_front = (const uint16_t *)fb;
     ESP_LOGI(TAG, "LVGL buffer size: %dKB", buffer_size * sizeof(lv_color_t) / 1024);
 #endif /* LVGL_PORT_AVOID_TEAR_ENABLE */
 
@@ -228,6 +236,11 @@ void lvgl_port_unlock(void)
 {
     assert(lvgl_mux && "lvgl_port_init must be called first");
     xSemaphoreGiveRecursive(lvgl_mux);
+}
+
+const uint16_t *lvgl_port_front_buffer(void)
+{
+    return s_front;
 }
 
 bool lvgl_port_notify_rgb_vsync(void)

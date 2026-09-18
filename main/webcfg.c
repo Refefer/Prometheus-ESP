@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "http_util.h"
+#include "lvgl_port.h"
 #include "poller.h"
 #include "prom_ident.h"
 #include "prom_text.h"
@@ -596,6 +597,79 @@ static esp_err_t get_metrics_seen(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ------------------------------------------------------------ screenshot */
+
+/*
+ * The glass, as a BMP. What is on the panel is the one thing the JSON routes
+ * cannot tell you -- whether the tile you pushed reads well from across a
+ * room -- and a photograph of a backlit screen never does it justice.
+ *
+ * The frame is copied out under the LVGL lock into a PSRAM scratch buffer
+ * and streamed from there, so rendering is blocked for one memcpy rather
+ * than for the whole transfer. 16-bit BI_BITFIELDS with the RGB565 masks and
+ * a negative height: the panel's own pixels, top-down, byte for byte.
+ */
+static esp_err_t get_screenshot(httpd_req_t *req)
+{
+    if (!authorised(req)) return deny(req);
+
+    enum { W = LVGL_PORT_H_RES, H = LVGL_PORT_V_RES, HDR = 14 + 40 + 12 };
+    const size_t pixels = (size_t)W * H * 2;
+
+    uint8_t *out = heap_caps_malloc(HDR + pixels, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (out == NULL) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"no memory for a frame\"}\n");
+        return ESP_OK;
+    }
+
+    if (!lvgl_port_lock(500)) {
+        heap_caps_free(out);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"display busy\"}\n");
+        return ESP_OK;
+    }
+    const uint16_t *fb = lvgl_port_front_buffer();
+    if (fb) memcpy(out + HDR, fb, pixels);
+    lvgl_port_unlock();
+
+    if (fb == NULL) {
+        heap_caps_free(out);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"nothing drawn yet\"}\n");
+        return ESP_OK;
+    }
+
+    uint8_t *h = out;
+    #define LE32(v) do { uint32_t _v = (uint32_t)(v); *h++ = _v; *h++ = _v >> 8; *h++ = _v >> 16; *h++ = _v >> 24; } while (0)
+    #define LE16(v) do { uint16_t _v = (uint16_t)(v); *h++ = _v; *h++ = _v >> 8; } while (0)
+    *h++ = 'B'; *h++ = 'M';
+    LE32(HDR + pixels);   /* file size */
+    LE32(0);              /* reserved */
+    LE32(HDR);            /* pixel data offset */
+    LE32(40);             /* BITMAPINFOHEADER */
+    LE32(W);
+    LE32((uint32_t)-H);   /* negative: top-down, as the framebuffer is */
+    LE16(1);              /* planes */
+    LE16(16);             /* bits per pixel */
+    LE32(3);              /* BI_BITFIELDS */
+    LE32(pixels);
+    LE32(0); LE32(0);     /* pixels per metre, unspecified */
+    LE32(0); LE32(0);     /* palette: none */
+    LE32(0xF800); LE32(0x07E0); LE32(0x001F);
+    #undef LE32
+    #undef LE16
+
+    httpd_resp_set_type(req, "image/bmp");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"panel.bmp\"");
+    esp_err_t err = httpd_resp_send(req, (const char *)out, (ssize_t)(HDR + pixels));
+    heap_caps_free(out);
+    return err;
+}
+
 /* ------------------------------------------------- describing the API */
 
 /*
@@ -625,7 +699,8 @@ static esp_err_t get_index(httpd_req_t *req)
 "    { \"method\": \"POST\",   \"path\": \"/layouts/{name}\",          \"auth\": true,  \"desc\": \"apply the posted layout and store it under {name}\" },\n"
 "    { \"method\": \"POST\",   \"path\": \"/layouts/{name}/save\",     \"auth\": true,  \"desc\": \"store what is on screen as {name}\" },\n"
 "    { \"method\": \"POST\",   \"path\": \"/layouts/{name}/activate\", \"auth\": true,  \"desc\": \"put {name} on screen\" },\n"
-"    { \"method\": \"DELETE\", \"path\": \"/layouts/{name}\",          \"auth\": true,  \"desc\": \"remove a stored layout\" }\n"
+"    { \"method\": \"DELETE\", \"path\": \"/layouts/{name}\",          \"auth\": true,  \"desc\": \"remove a stored layout\" },\n"
+"    { \"method\": \"GET\",    \"path\": \"/screenshot\",              \"auth\": true,  \"desc\": \"what is on the glass right now, as a BMP\" }\n"
 "  ]\n"
 "}\n");
     return ESP_OK;
@@ -713,7 +788,7 @@ esp_err_t webcfg_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port      = 80;
-    cfg.max_uri_handlers = 10;
+    cfg.max_uri_handlers = 12;
     /* /layouts/<name>/<verb> needs prefix matching. */
     cfg.uri_match_fn     = httpd_uri_match_wildcard;
     cfg.stack_size       = 8192;    /* a pushed config is written to flash on
@@ -750,6 +825,8 @@ esp_err_t webcfg_start(void)
         .uri = "/layouts*", .method = HTTP_POST, .handler = layouts_post };
     static const httpd_uri_t k_lay_del = {
         .uri = "/layouts*", .method = HTTP_DELETE, .handler = layouts_delete };
+    static const httpd_uri_t k_shot = {
+        .uri = "/screenshot", .method = HTTP_GET, .handler = get_screenshot };
 
     /* Specific routes first: with wildcard matching, /config would otherwise
      * be shadowed by a broader pattern registered before it. */
@@ -758,6 +835,7 @@ esp_err_t webcfg_start(void)
     httpd_register_uri_handler(s_server, &k_status);
     httpd_register_uri_handler(s_server, &k_schema);
     httpd_register_uri_handler(s_server, &k_seen);
+    httpd_register_uri_handler(s_server, &k_shot);
     httpd_register_uri_handler(s_server, &k_lay_get);
     httpd_register_uri_handler(s_server, &k_lay_post);
     httpd_register_uri_handler(s_server, &k_lay_del);

@@ -71,6 +71,14 @@ void lvgl_port_unlock(void);
 /* Called from the LCD frame-done ISR; wakes the flush waiting on vsync. */
 bool lvgl_port_notify_rgb_vsync(void);
 
+/*
+ * The framebuffer currently being scanned out: LVGL_PORT_H_RES x
+ * LVGL_PORT_V_RES native-endian RGB565, row-major, no padding. NULL until the
+ * first frame has been flushed. Hold the LVGL lock while reading it, or a
+ * flip mid-copy hands you half of two frames.
+ */
+const uint16_t *lvgl_port_front_buffer(void);
+
 #ifdef __cplusplus
 }
 #endif
