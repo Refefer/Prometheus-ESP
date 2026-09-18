@@ -580,7 +580,7 @@ static void set_hdr_title(void)
     const char *ep = (c->n_endpoints && c->endpoints[0].name[0])
                      ? c->endpoints[0].name : "Prometheus Panel";
     const char *ly = config_active_layout();
-    if (ly[0]) label_set_fmt_if_changed(s_hdr_title, "%s  \u00b7  %s", ep, ly);
+    if (ly[0]) label_set_fmt_if_changed(s_hdr_title, "%s  \u2022  %s", ep, ly);
     else       label_set_if_changed(s_hdr_title, ep);
 }
 
