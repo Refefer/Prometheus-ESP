@@ -4,14 +4,66 @@ A generic **Prometheus metrics panel** for the **Waveshare ESP32-S3-Touch-LCD-7*
 (the 800x480 model, capacitive touch). Point it at any metrics endpoint, pick
 the metrics you care about on the touchscreen, hang it on a wall.
 
-- Reads **raw `/metrics`** text exposition from any exporter, and a
-  **Prometheus server's HTTP API** (`/api/v1/query`, `/api/v1/query_range`).
-- Renders counters (as rates), gauges, histograms (bucket distribution and
-  derived quantiles) and summaries.
-- **Configured entirely on the glass** -- WiFi, endpoint URLs, metric
-  selection. No companion web page, no serial console.
-- Multiple screens with swipe and auto-rotate; settings and selections survive
-  a power cut.
+It is set up from the touchscreen, and it is also a small HTTP server: the
+same configuration is readable and pushable as JSON, and the device describes
+its own format, so a script or an LLM agent can build a dashboard for it
+without ever having seen one.
+
+## What it does
+
+**On the glass**
+
+- Wi-Fi setup with a network scan and an on-screen keyboard. Nothing is
+  compiled in; there is no serial console step.
+- Endpoint editor with a **Test** button that tells a wrong host from a wrong
+  path from "that is a web page, not metrics".
+- Metric browser: discover everything the endpoint exposes, search, tick.
+  Drill down to one label set when a family has many.
+- Tap an empty cell to fill it; tap a tile to change its widget, span,
+  position, title, units and series mode, or to combine it with a second
+  series.
+- Multiple screens, swiped between. A new screen is made by swiping past the
+  last one and tapping a cell.
+- Named layouts: save what is on screen, switch between them from the
+  header, and never lose an unsaved arrangement to a tap.
+- Six themes, an SNTP clock and Wi-Fi strength in the top bar.
+
+**Widgets and math**
+
+- Stat, sparkline, chart, bar, gauge, status, histogram and multi-row tiles.
+- Counters become rates over a window you choose; histograms give bucket
+  distributions and derived quantiles; gauges range against the largest
+  value seen or a pinned maximum.
+- Derived tiles: share, ratio, difference and sum of two series, computed on
+  rates rather than lifetime totals.
+- Format inferred from Prometheus naming: `_bytes` is IEC, `_seconds` is a
+  duration, `_ratio` is a percent. Pin the SI prefix, add a currency mark or
+  a suffix, group thousands.
+- Streaming exposition parser tested on the host: byte-at-a-time replay is
+  identical to whole-body parsing, counter resets and `+Inf` buckets handled.
+
+**Over HTTP**
+
+- `GET /config` and `POST /config`: the whole configuration as JSON, applied
+  whole or rejected with one sentence naming the panel and what to fix.
+- `GET /schema`: the format and every legal value, generated from the same
+  tables the parser uses. `GET /metrics-seen`: what the endpoint exposes,
+  with a sample selector for each family. Between them an agent has
+  everything it needs to write a dashboard from a prompt.
+- `/layouts`: store, list, apply and switch named layouts.
+- `GET /screenshot`: the glass as a BMP. `GET /status`: identity, uptime,
+  memory, clock, no token needed.
+- One token for everything else, shown on the device, sent as `X-Auth`.
+
+**Under the hood**
+
+- Settings survive a power cut: LittleFS with atomic renames, and a saved
+  config that changes only presentation keeps its rate baselines and chart
+  history instead of starting over.
+- Every screen's panels are polled whether or not they are showing, so a
+  swipe lands on a chart that is already drawn.
+- Scrapes a 470 KB exposition body without touching internal SRAM; the
+  parser streams and the data layer lives in PSRAM.
 
 Board bring-up (`main/waveshare_rgb_lcd_port.*`, `main/lvgl_port.*`) comes from
 [waveshare-ips-esp32](../waveshare-ips-esp32), which extracted it from
@@ -69,8 +121,7 @@ Two consequences of that wiring shape the firmware:
 
 - The backlight is a plain **on/off** line on the expander. There is no PWM
   pin and no PWM peripheral behind it, so there is no brightness slider.
-  Instead there are **six themes**, and a blackout schedule that turns the
-  panel off entirely.
+  Instead there are **six themes**; a scheduled blackout is on the list.
 - **GPIO0 is a data line** (green bit 1). The BOOT button shares it, so the
   button cannot be read once the display is running. Recovery from a bad
   config or a wedged flash is `idf.py erase-flash` over USB; there is no
@@ -155,7 +206,7 @@ which metrics appear is compiled in.
 | Screenshot of the glass over HTTP | done |
 
 Not built yet: editable warn/crit thresholds, SUMMARY and RATE renderers, the
-PromQL client, OTA, history that survives a reboot.
+PromQL client, a night blackout schedule, OTA, history that survives a reboot.
 
 ## Using it
 
