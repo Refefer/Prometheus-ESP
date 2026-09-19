@@ -690,6 +690,11 @@ static void build_dashboard(void)
     lv_label_set_long_mode(s_ftr_right, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_ftr_right, LV_TEXT_ALIGN_RIGHT, 0);
 
+    /* The screen object outlives a rebuild -- ui_restyle cleans its children
+     * and calls back in here -- and lv_obj_clean does not touch the screen's
+     * own callbacks. Without this, every theme change stacked another copy
+     * of the handler, and one swipe paged once per copy. */
+    while (lv_obj_remove_event_cb(scr, gesture_cb)) { }
     lv_obj_add_event_cb(scr, gesture_cb, LV_EVENT_GESTURE, NULL);
 
     tile_set_tap_handler(tile_tapped);
