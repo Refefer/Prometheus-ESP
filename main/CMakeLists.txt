@@ -25,6 +25,7 @@ idf_component_register(
         "ui_layouts.c"
         "timekeep.c"
         "webcfg.c"
+        "sysmon.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver esp_lcd esp_timer

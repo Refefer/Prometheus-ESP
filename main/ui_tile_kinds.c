@@ -256,21 +256,33 @@ static void stat_build(tile_inst_t *t, lv_obj_t *body)
     lv_obj_set_pos(p->suf, 0, TILE_H(t->spec->h) - 2 * PAD_S - 20 - 26);
 }
 
+/*
+ * The text beside a value: its unit when there is a reading. A metric the
+ * endpoint does not expose says so there, because "--" alone reads the same as
+ * a scrape that has not happened yet, and only one of those fixes itself.
+ */
+static const char *suf_text(const tile_data_t *d)
+{
+    if (d->state == MS_OK)      return d->suffix;
+    if (d->state == MS_MISSING) return tile_state_caption(d);
+    return "";
+}
+
 static void stat_update(tile_inst_t *t, const tile_data_t *d)
 {
     stat_priv_t *p = t->priv;
-    const char *txt = d->valid ? d->num : "--";
+    const char *txt = d->state == MS_OK ? d->num : "--";
     const lv_font_t *f = fit_font(num_font(t, d->numeric_only), txt,
                                   d->numeric_only,
                                   TILE_W(t->spec->w) - 2 * PAD_S);
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
-    label_set_if_changed(p->val, d->valid ? d->num : "--");
-    label_set_if_changed(p->suf, d->valid ? d->suffix
-                                          : (d->restarted ? "restarted"
-                                             : d->warming ? "warming up" : "no data"));
-    text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
+    label_set_if_changed(p->val, d->state == MS_OK ? d->num : "--");
+    label_set_if_changed(p->suf, d->state == MS_OK ? d->suffix
+                                 : d->restarted ? "restarted"
+                                 : tile_state_caption(d));
+    text_color_if_changed(p->val, d->state == MS_OK ? app_theme_sev(t->last_sev) : COL_STALE);
 }
 
 static void stat_destroy(tile_inst_t *t) { lv_mem_free(t->priv); t->priv = NULL; }
@@ -324,7 +336,7 @@ static void spark_build(tile_inst_t *t, lv_obj_t *body)
 static void spark_update(tile_inst_t *t, const tile_data_t *d)
 {
     chart_priv_t *p = t->priv;
-    const char *txt = d->valid ? d->num : "--";
+    const char *txt = d->state == MS_OK ? d->num : "--";
     /* At 2x1 and wider the sparkline takes half the body, so the value only
      * gets the other half. */
     lv_coord_t body_w = TILE_W(t->spec->w) - 2 * PAD_S;
@@ -334,12 +346,12 @@ static void spark_update(tile_inst_t *t, const tile_data_t *d)
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
-    label_set_if_changed(p->val, d->valid ? d->num : "--");
-    text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
+    label_set_if_changed(p->val, d->state == MS_OK ? d->num : "--");
+    text_color_if_changed(p->val, d->state == MS_OK ? app_theme_sev(t->last_sev) : COL_STALE);
 
     /* The suffix sits to the right of the value, so it has to move as the
      * value's width changes. */
-    label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+    label_set_if_changed(p->suf, suf_text(d));
     lv_obj_align_to(p->suf, p->val, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -6);
 
     chart_sync(t, p, 60);
@@ -432,16 +444,16 @@ static void chartt_update(tile_inst_t *t, const tile_data_t *d)
     p->group = d->group;
     p->fmt   = d->fmt;
 
-    const char *txt = d->valid ? d->num : "--";
+    const char *txt = d->state == MS_OK ? d->num : "--";
     const lv_font_t *f = fit_font(d->numeric_only ? FONT_NUM_L : FONT_XL, txt,
                                   d->numeric_only,
                                   TILE_W(t->spec->w) - 2 * PAD_S);
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
-    label_set_if_changed(p->val, d->valid ? d->num : "--");
-    text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
-    label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+    label_set_if_changed(p->val, d->state == MS_OK ? d->num : "--");
+    text_color_if_changed(p->val, d->state == MS_OK ? app_theme_sev(t->last_sev) : COL_STALE);
+    label_set_if_changed(p->suf, suf_text(d));
     lv_obj_align_to(p->suf, p->val, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -8);
 
     chart_sync(t, p, TILE_HIST_MAX);
@@ -519,16 +531,16 @@ static void bar_update(tile_inst_t *t, const tile_data_t *d)
     if (lv_obj_get_style_text_font(p->val, 0) != f) {
         lv_obj_set_style_text_font(p->val, f, 0);
     }
-    label_set_if_changed(p->val, d->valid ? d->num : "--");
-    text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
-    label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+    label_set_if_changed(p->val, d->state == MS_OK ? d->num : "--");
+    text_color_if_changed(p->val, d->state == MS_OK ? app_theme_sev(t->last_sev) : COL_STALE);
+    label_set_if_changed(p->suf, suf_text(d));
     lv_obj_align_to(p->suf, p->val, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -6);
 
     float lo = isnan(t->spec->vmin) ? 0.0f : t->spec->vmin;
     float hi = ratio_hi(t, d);
     if (hi <= lo) hi = lo + 1.0f;
 
-    if (d->valid) {
+    if (d->state == MS_OK) {
         float frac = (d->value - lo) / (hi - lo);
         if (frac < 0) frac = 0;
         if (frac > 1) frac = 1;
@@ -608,15 +620,15 @@ static void gauge_build(tile_inst_t *t, lv_obj_t *body)
 static void gauge_update(tile_inst_t *t, const tile_data_t *d)
 {
     gauge_priv_t *p = t->priv;
-    label_set_if_changed(p->val, d->valid ? d->num : "--");
-    text_color_if_changed(p->val, d->valid ? app_theme_sev(t->last_sev) : COL_STALE);
+    label_set_if_changed(p->val, d->state == MS_OK ? d->num : "--");
+    text_color_if_changed(p->val, d->state == MS_OK ? app_theme_sev(t->last_sev) : COL_STALE);
 
     /*
      * On an auto-ranged gauge the caption says what full scale is, because
      * otherwise the needle is a fraction of a number the reader cannot see --
      * "5" against an invisible maximum tells you nothing.
      */
-    if (d->valid && isnan(t->spec->vmax) &&
+    if (d->state == MS_OK && isnan(t->spec->vmax) &&
         d->fmt != FMT_PCT_01 && d->fmt != FMT_PCT_100 && d->peak > 0.0f) {
         char pk[56], line[72];
         fmt_style_t psy = { d->fmt, d->unit ? d->unit : "", d->scale, d->group,
@@ -637,7 +649,7 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
         snprintf(line, sizeof(line), "of %s", pk);
         label_set_if_changed(p->suf, line);
     } else {
-        label_set_if_changed(p->suf, d->valid ? d->suffix : "");
+        label_set_if_changed(p->suf, suf_text(d));
     }
     lv_obj_align(p->val, LV_ALIGN_CENTER, 0, -4);
     lv_obj_align(p->suf, LV_ALIGN_CENTER, 0, 22);
@@ -646,7 +658,7 @@ static void gauge_update(tile_inst_t *t, const tile_data_t *d)
     float hi = ratio_hi(t, d);
     if (hi <= lo) hi = lo + 1.0f;
 
-    if (d->valid) {
+    if (d->state == MS_OK) {
         float frac = (d->value - lo) / (hi - lo);
         if (frac < 0) frac = 0;
         if (frac > 1) frac = 1;
@@ -694,12 +706,12 @@ static void status_build(tile_inst_t *t, lv_obj_t *body)
 static void status_update(tile_inst_t *t, const tile_data_t *d)
 {
     status_priv_t *p = t->priv;
-    bool up = d->valid && d->value != 0.0f;
+    bool up = d->state == MS_OK && d->value != 0.0f;
 
-    bg_color_if_changed(p->dot, !d->valid ? COL_STALE : up ? COL_OK : COL_CRIT);
-    label_set_if_changed(p->word, !d->valid ? "?" : up ? "UP" : "DOWN");
-    text_color_if_changed(p->word, !d->valid ? COL_STALE : up ? COL_OK : COL_CRIT);
-    label_set_if_changed(p->sub, d->valid ? "" : "no data");
+    bg_color_if_changed(p->dot, d->state != MS_OK ? COL_STALE : up ? COL_OK : COL_CRIT);
+    label_set_if_changed(p->word, d->state != MS_OK ? "?" : up ? "UP" : "DOWN");
+    text_color_if_changed(p->word, d->state != MS_OK ? COL_STALE : up ? COL_OK : COL_CRIT);
+    label_set_if_changed(p->sub, tile_state_caption(d));
     lv_obj_align(p->word, LV_ALIGN_TOP_MID, 0, 52);
     lv_obj_align(p->sub, LV_ALIGN_TOP_MID, 0, 76);
 }
@@ -781,10 +793,10 @@ static void hist_update(tile_inst_t *t, const tile_data_t *d)
 {
     hist_priv_t *p = t->priv;
 
-    if (!d->valid || !d->has_hist || d->n_buckets == 0) {
+    if (d->state != MS_OK || !d->has_hist || d->n_buckets == 0) {
         for (int i = 0; i < 3; i++) label_set_if_changed(p->q_val[i], "--");
         label_set_if_changed(p->lo_lbl, "");
-        label_set_if_changed(p->hi_lbl, d->warming ? "warming up" : "no data");
+        label_set_if_changed(p->hi_lbl, tile_state_caption(d));
         return;
     }
 
@@ -914,13 +926,13 @@ static void multi_update(tile_inst_t *t, const tile_data_t *d)
 {
     multi_priv_t *p = t->priv;
 
-    if (!d->valid || d->n_children == 0) {
+    if (d->state != MS_OK || d->n_children == 0) {
         for (int r = 0; r < p->rows; r++) {
             hidden_if_changed(p->name[r], true);
             hidden_if_changed(p->val[r], true);
             hidden_if_changed(p->bar[r], true);
         }
-        label_set_if_changed(p->more, d->warming ? "warming up" : "no data");
+        label_set_if_changed(p->more, tile_state_caption(d));
         return;
     }
 

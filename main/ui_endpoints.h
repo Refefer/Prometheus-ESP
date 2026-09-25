@@ -1,4 +1,8 @@
-/* The endpoint editor: type a URL on the glass and test it before saving. */
+/*
+ * The settings sheet behind the gear: an Endpoints tab to add, edit, test and
+ * remove endpoints, and a Device tab for theme, auto-rotate, Wi-Fi and the
+ * config push token.
+ */
 #pragma once
 #include <stdbool.h>
 

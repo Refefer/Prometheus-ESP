@@ -28,6 +28,19 @@ typedef enum {
     TILE_KIND_COUNT,
 } tile_kind_t;
 
+/*
+ * What a reading can be trusted for. One state rather than a set of flags,
+ * so "valid and warming" or "missing and valid" cannot be expressed. Produced
+ * by the poller, consumed by the renderers.
+ */
+typedef enum {
+    MS_NO_DATA = 0,   /* no successful scrape yet, or the last one failed */
+    MS_WARMING,       /* seen, but a rate or window has no baseline yet */
+    MS_MISSING,       /* the scrape worked and nothing matched: this endpoint
+                       * does not expose the metric */
+    MS_OK,
+} metric_state_t;
+
 /* What a tile shows and where. */
 typedef struct {
     uint16_t    panel_id;     /* so a tap can open the right settings */
@@ -47,8 +60,10 @@ typedef struct {
 
 /* One refresh's worth of already-resolved data. Renderers do no maths. */
 typedef struct {
-    bool        valid;
-    bool        warming;
+    metric_state_t state;
+    /* Changes only when the reading is new; history is appended per seq, not
+     * per repaint, so one reading is never plotted twice. */
+    uint32_t    seq;
     bool        restarted;
     float       value;        /* for charts and ranges */
     const char *num;          /* formatted, digits-only when numeric_only */
@@ -101,6 +116,7 @@ struct tile_inst {
      * ever need it. */
     float     hist[TILE_HIST_MAX];
     uint16_t  hist_n;
+    uint32_t  last_seq;       /* seq of the newest reading in hist */
     severity_t last_sev;
 };
 
@@ -132,4 +148,8 @@ void tile_set_tap_handler(void (*cb)(uint16_t panel_id));
 /* Build a tile into `parent` at its spec's grid position. */
 tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec);
 void         tile_update(tile_inst_t *t, const tile_data_t *d);
+
+/* The caption for a tile with no number to show: "warming up", "no data" or
+ * "not on endpoint". Empty for a reading that is fine. */
+const char  *tile_state_caption(const tile_data_t *d);
 void         tile_destroy(tile_inst_t *t);

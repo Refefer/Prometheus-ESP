@@ -2,10 +2,11 @@
  * The layout picker.
  *
  * A layout is the presentation half of the configuration -- the tiles and
- * where they sit -- stored under a name. The endpoint is deliberately not
- * part of one: the same URL serves entirely different metrics depending on
- * what is running behind it, so switching what you are looking at must not
- * change what you are connected to.
+ * where they sit -- stored under a name. Endpoint definitions are deliberately
+ * not part of one: the same URL serves entirely different metrics depending
+ * on what is running behind it, so switching what you are looking at must not
+ * change what you are connected to. Each screen does keep the id of the
+ * endpoint it reads, so a layout brings its screen-to-endpoint mapping along.
  */
 
 #include "ui_layouts.h"
@@ -214,7 +215,7 @@ static void save_as_cb(lv_event_t *e)
         .title    = "Save layout",
         .label    = "Name",
         .value    = s_kbd_value,
-        .hint     = "Tiles and their positions. The endpoint is not included.",
+        .hint     = "Tiles, positions and which endpoint each screen reads.",
         .kind     = KB_TEXT,
         .validate = name_validate,
         .done     = name_done,
@@ -304,8 +305,8 @@ static void refresh_list(void)
                 "Save as -- and the arrangement comes back with one tap.");
         } else if (active[0]) {
             label_set_fmt_if_changed(s_hint,
-                "Showing '%s'. Tap another to switch; the endpoint stays "
-                "where it is.", active);
+                "Showing '%s'. Tap another to switch; endpoint settings "
+                "stay as they are.", active);
         } else {
             label_set_if_changed(s_hint,
                 "The tiles on screen are not saved under any name yet.");

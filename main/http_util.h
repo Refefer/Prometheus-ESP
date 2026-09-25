@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include "config.h"
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -41,7 +42,9 @@ typedef struct {
     uint32_t         duration_ms;
 } http_result_t;
 
-#define HTTP_KEEPALIVE_SLOTS 3
+/* One per endpoint: the poller uses slot i for its endpoint i. A slot costs
+ * ~3KB of internal SRAM only once it holds a connection. */
+#define HTTP_KEEPALIVE_SLOTS CFG_MAX_ENDPOINTS
 
 /*
  * `slot` selects a cached connection (0..HTTP_KEEPALIVE_SLOTS-1), or -1 for a

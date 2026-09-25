@@ -323,7 +323,7 @@ static void selb_cb(lv_event_t *e)
         ui_toast("Choose a comparison first", SEV_WARN, 2000);
         return;
     }
-    ui_browser_open_select(selb_chosen);
+    ui_browser_open_select(p->screen, selb_chosen);
 }
 
 static void q_cb(lv_event_t *e)
@@ -423,7 +423,31 @@ static void screen_cb(lv_event_t *e)
     int want = (int)p->screen + d;
     if (want < 0 || want >= screens_reachable()) return;
 
-    if (!config_ensure_screen((uint8_t)want)) return;
+    /*
+     * A tile reads its screen's endpoint, so moving it onto a screen that
+     * shows another endpoint would silently change what it measures. Refused;
+     * a screen with nothing on it simply takes the tile's endpoint.
+     */
+    uint16_t mine = config_panel_ep(p);
+    bool occupied = false;
+    const config_t *c = config_get();
+    for (int i = 0; i < c->n_panels; i++) {
+        const cfg_panel_t *o = &c->panels[i];
+        if (o != p && o->sel[0] && o->screen == want) { occupied = true; break; }
+    }
+    uint16_t there = config_screen_ep((uint8_t)want);
+    if (occupied && there != mine) {
+        const cfg_endpoint_t *a = config_endpoint_by_id(there);
+        const cfg_endpoint_t *b = config_endpoint_by_id(mine);
+        char msg[112];
+        snprintf(msg, sizeof(msg), "Screen %d shows '%s'; this tile reads '%s'",
+                 want + 1, a ? a->name : "?", b ? b->name : "?");
+        ui_toast(msg, SEV_WARN, 3000);
+        return;
+    }
+
+    if (!config_ensure_screen((uint8_t)want, mine)) return;
+    if (!occupied) config_screen_set_endpoint((uint8_t)want, mine);
 
     uint8_t was_screen = p->screen, was_col = p->col, was_row = p->row;
     p->screen = (uint8_t)want;

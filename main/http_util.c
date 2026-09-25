@@ -158,7 +158,7 @@ retry:;
              * These buffers are malloc'd internally, and
              * CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096 puts anything this
              * size in the scarce internal heap. The defaults (4096 each) would
-             * hold 24KB of internal RAM across three slots; 2048/1024 holds 9KB.
+             * hold 8KB of internal RAM per slot in use; 2048/1024 holds 3KB.
              */
             .buffer_size           = 2048,
             .buffer_size_tx        = 1024,

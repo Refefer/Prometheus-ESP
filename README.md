@@ -35,15 +35,17 @@ tools/screenshot.py --host $D --token $TOK panel.png        # needs Pillow
 
 - Wi-Fi setup with a network scan and an on-screen keyboard. Nothing is
   compiled in; there is no serial console step.
-- Endpoint editor with a **Test** button that tells a wrong host from a wrong
-  path from "that is a web page, not metrics".
+- Up to eight endpoints, each with a **Test** button that tells a wrong host
+  from a wrong path from "that is a web page, not metrics".
+- One endpoint per screen: an sglang screen and a node_exporter screen side
+  by side, each polled on its own interval and backing off on its own.
 - Metric browser: discover everything the endpoint exposes, search, tick.
   Drill down to one label set when a family has many.
 - Tap an empty cell to fill it; tap a tile to change its widget, span,
   position, title, units and series mode, or to combine it with a second
   series.
-- Multiple screens, swiped between. A new screen is made by swiping past the
-  last one and tapping a cell.
+- Multiple screens, swiped between, or paged automatically. A new screen is
+  made by swiping past the last one and tapping a cell.
 - Named layouts: save what is on screen, switch between them from the
   header, and never lose an unsaved arrangement to a tap.
 - Six themes, an SNTP clock and Wi-Fi strength in the top bar.
@@ -204,6 +206,9 @@ which metrics appear is compiled in.
 | Multiple screens, swipe between them | done |
 | Layouts saved by name, switched from the header | done |
 | Screenshot of the glass over HTTP | done |
+| Several endpoints, one per screen, each on its own schedule | done |
+| Auto-rotate through screens, paused by a touch | done |
+| Per-core CPU and heap readout (`/status`, serial heartbeat) | done |
 
 Not built yet: editable warn/crit thresholds, SUMMARY and RATE renderers, the
 PromQL client, a night blackout schedule, OTA, history that survives a reboot.
@@ -212,16 +217,25 @@ PromQL client, a night blackout schedule, OTA, history that survives a reboot.
 
 First boot lands in the WiFi wizard. After that:
 
-- **gear** -- the endpoint: URL, name, poll interval, and a Test button that
+- **gear** -- two tabs. **Endpoints**: pick one from the list, or add one
+  with **New**; each has a URL, name, poll interval, and a Test button that
   distinguishes a wrong host from a wrong path from "that is a web page".
+  **Delete** refuses while a screen reads the endpoint, and says which.
+  **Device**: theme, auto-rotate and how long each screen stays up, Wi-Fi,
+  and the config push token.
 - **a `+` on an empty cell** -- choose what goes there, then how it looks.
 - **any tile** -- widget type, span, position, title, one-series vs
   all-series, and combining it with a second series. The arrows nudge it one
   cell; the 4x3 miniature beside them places it anywhere it fits -- tap a
   cell to put the tile's top-left there. Cells outlined green can take it at
   its current size, which is what makes a 2x2 chart movable on a busy grid.
-- **list button** -- browse everything the endpoint exposes; `Show: selected`
-  filters to what is already on screen, which is the view for removing tiles.
+- **list button** -- browse everything the screen's endpoint exposes;
+  `Show: selected` filters to what is already on screen, which is the view for
+  removing tiles. With more than one endpoint the browser has a picker naming
+  the endpoint it lists. On an empty screen that simply chooses what the
+  screen will read. On a screen with tiles it repoints the whole screen: the
+  candidate is scanned first, and a confirmation names every metric on the
+  screen it does not expose before anything changes.
 
 A ticked metric infers its format, aggregation and widget from Prometheus
 naming conventions -- counters become rates, `_bytes` becomes IEC, `_seconds`
@@ -236,7 +250,7 @@ what it can do:
 ```sh
 curl http://$D/            # the routes, what they do, which need auth
 curl http://$D/schema      # the config format and every legal value
-curl http://$D/status      # identity, uptime, free memory
+curl http://$D/status      # identity, uptime, memory, CPU per core, each endpoint's scrape
 ```
 
 `/schema` generates its enum lists from the same tables the parser uses, so a
@@ -389,13 +403,58 @@ screen is made by swiping to it and tapping a cell. Every screen's panels are
 polled whether or not you are looking at them, so a counter has its baseline
 and a chart its history by the time you swipe across.
 
+### Endpoints and screens
+
+A screen reads exactly one endpoint, named by the screen's `ep`, and every
+tile on it reads that one. The binding lives on the screen rather than on
+each tile so that one screen mixing two exporters is not a state the config
+can express. The header names the screen's endpoint and the footer reports
+its scrape, so paging to a screen whose exporter is down says so there.
+
+```json
+"endpoints": [ { "id": 1, "name": "sglang", "url": "http://10.0.0.5:30000/metrics" },
+               { "id": 4, "name": "node",   "url": "http://10.0.0.5:9100/metrics" } ],
+"screens":   [ { "title": "LLM",  "ep": 1 },
+               { "title": "Host", "ep": 4 } ]
+```
+
+Each endpoint is polled on its own `poll_s` and backs off on its own when it
+fails, one at a time on one task. An endpoint no screen reads is not polled.
+An exporter that does not answer at all holds that task for its
+`timeout_ms` (8 s by default) and then backs off exponentially to five
+minutes, so the other screens slip by at most that much and only rarely.
+
+Repointing a screen with tiles on it restarts every rate and chart on it --
+they are measurements of a different process now. A tile whose metric the new
+endpoint does not expose shows **not on endpoint** in the warning colour,
+distinct from `--` (no scrape yet) and "warming up" (a rate with no baseline),
+because only that one will not fix itself by waiting.
+
+A tile cannot be moved onto a screen that reads a different endpoint; the
+tile settings refuse and name both. Moving one onto an empty screen binds
+that screen to the tile's endpoint.
+
+Schema 2 put `ep` on each panel. A document in that shape still loads: each
+screen takes the endpoint its panels name, and a screen whose panels name
+two different endpoints is refused with a sentence saying so.
+
+### Auto-rotate
+
+`device.rotate_enabled` pages through the screens that have tiles, holding
+each for `device.rotate_dwell_s` (5 to 3600 s). Any touch restarts the wait,
+so reading a tile is never interrupted by the page leaving, and it never
+pages while a sheet or the keyboard is open. The empty "new screen" page is
+skipped. Both settings are on the gear's Device tab.
+
 ### Layouts
 
 A layout is the presentation half -- screens and panels -- saved under a name.
-Endpoints and device settings are deliberately not part of one, because the
-same URL can serve completely different metrics depending on what is running
-behind it. An sglang layout and a vllm layout point at the same host and share
-nothing else.
+Endpoint definitions and device settings are deliberately not part of one,
+because the same URL can serve completely different metrics depending on what
+is running behind it. An sglang layout and a vllm layout point at the same
+host and share nothing else. A layout does carry each screen's endpoint *id*,
+so it only applies on a device that has endpoints with those ids; one that
+names a missing id is refused rather than guessed at.
 
 On the device, the header's layouts button lists what is saved, marks which
 one is on screen, and switches with one tap. Switching away from an
@@ -500,6 +559,15 @@ app logs a heartbeat every 5 s instead of relying on the boot log:
 idf.py -p /dev/ttyACM0 monitor     # needs a real TTY
 ```
 
+```
+I (40908) sysmon: cpu0 8%  cpu1 8%  SRAM 117K (min 106K)  PSRAM 4935K
+```
+
+CPU is per core, from FreeRTOS run-time stats: the share of the last five
+seconds that core's idle task did not run. `GET /status` carries the same
+figures as `cpu` and `min_free_internal`, and an `endpoints` entry per
+endpoint with its scrape status.
+
 ## Host tests
 
 The `components/prom/` component has **no ESP-IDF dependencies on purpose**, so
@@ -567,6 +635,27 @@ Verified on hardware against it:
 | endpoint killed | classified "connection failed", backs off, recovers |
 | gap in scrapes | rate re-baselines instead of averaging across the gap |
 | 40 duplicate buckets | quantile stays correct |
+
+## Load
+
+Measured on the device (`/status` and the heartbeat), against an sglang
+endpoint serving an 89 KB, 579-sample body:
+
+| | core 0 | core 1 | SRAM free (min) |
+|---|---|---|---|
+| one endpoint, polled every 2 s, 10 tiles | 8% | 7% | 117K (106K) |
+| plus two small exporters (2 KB bodies, 5 s and 10 s), 12 tiles | 9% | 8% | 110K (99K) |
+
+Scraping is CPU-bound rather than network-bound: a scrape takes about 185 ms,
+nearly all of it parsing and matching on core 0, which is where the 8% comes
+from. So what an endpoint costs is its body size over its poll interval, and
+several endpoints add up that way -- three bodies like this one every 2 s is
+roughly a quarter of core 0. Rendering is on core 1 and does not compete.
+Internal SRAM, not CPU, is the budget to watch: each endpoint with a live
+keep-alive connection holds about 3 KB of it. An endpoint that never answers is the
+one thing that shows up elsewhere: with it pointed at a dead address, the
+sglang screen went up to 9 s without an update each time the dead one was
+tried, which backoff makes rarer and rarer.
 
 ## Memory baseline
 

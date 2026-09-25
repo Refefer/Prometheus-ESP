@@ -385,7 +385,7 @@ static void build_done(void)
     lv_obj_align(info, LV_ALIGN_TOP_MID, 0, 180);
 
     lv_obj_t *next = make_label(s_step_page, FONT_M, COL_DIM);
-    lv_label_set_text(next, "The gear button sets which endpoint to poll.");
+    lv_label_set_text(next, "The gear button sets up the endpoints to poll.");
     lv_obj_set_style_text_align(next, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(next, LV_ALIGN_TOP_MID, 0, 240);
 

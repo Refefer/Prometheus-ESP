@@ -24,6 +24,7 @@
 #include "prom_text.h"
 #include "secrets.h"
 #include "storage.h"
+#include "sysmon.h"
 #include "ui_kbd.h"
 #include "ui_layout.h"
 #include "ui_browser.h"
@@ -149,9 +150,8 @@ static void endpoints_cb(lv_event_t *e)
 /*
  * The dashboard.
  *
- * Tiles come from the stored panels, and the poller's watch slots are in the
- * same order, so slot i is panel i. Nothing about which metrics appear is
- * compiled in any more.
+ * Tiles come from the stored panels and find their numbers in the poller's
+ * snapshot by panel id. Nothing about which metrics appear is compiled in.
  */
 static tile_inst_t *s_tiles[CFG_MAX_PANELS];
 static tile_spec_t  s_specs[CFG_MAX_PANELS];
@@ -182,6 +182,9 @@ static uint32_t     s_seen_gen = UINT32_MAX;
 static uint8_t      s_screen;
 static lv_obj_t    *s_dots[CFG_MAX_SCREENS];
 static int          s_dot_n;
+/* When the page last changed, by hand or by rotation; auto-rotate waits a
+ * full dwell from here. Monotonic ms. */
+static int64_t      s_last_page_ms;
 
 /*
  * True while a full-screen modal owns the display.
@@ -226,6 +229,15 @@ static int screens_used(void)
     return hi > 0 ? hi : 1;
 }
 
+static bool screen_has_panels(int idx)
+{
+    const config_t *c = config_get();
+    for (int i = 0; i < c->n_panels; i++) {
+        if (c->panels[i].sel[0] && c->panels[i].screen == idx) return true;
+    }
+    return false;
+}
+
 static int panels_live(void)
 {
     const config_t *c = config_get();
@@ -264,6 +276,9 @@ typedef struct {
     uint32_t data_fp;
     uint16_t n;
     bool     used;
+    /* The reading the newest point came from, so the repaint that follows a
+     * rebuild does not plot it a second time. */
+    uint32_t last_seq;
     float    v[TILE_HIST_MAX];
 } hist_keep_t;
 static hist_keep_t s_keep[CFG_MAX_PANELS];
@@ -281,6 +296,7 @@ static void hist_stash(const tile_inst_t *t, const tile_spec_t *sp)
     slot->panel_id = sp->panel_id;
     slot->data_fp  = sp->data_fp;
     slot->n        = t->hist_n;
+    slot->last_seq = t->last_seq;
     memcpy(slot->v, t->hist, sizeof(float) * t->hist_n);
 }
 
@@ -293,7 +309,8 @@ static void hist_apply(tile_inst_t *t, const tile_spec_t *sp)
         if (!s_keep[i].used) continue;
         if (s_keep[i].panel_id != sp->panel_id) continue;
         if (s_keep[i].data_fp != sp->data_fp) return;   /* different series now */
-        t->hist_n = s_keep[i].n;
+        t->hist_n   = s_keep[i].n;
+        t->last_seq = s_keep[i].last_seq;
         memcpy(t->hist, s_keep[i].v, sizeof(float) * s_keep[i].n);
         s_hist_kept++;
         return;
@@ -538,9 +555,44 @@ static void go_to_screen(int idx)
     if (idx >= n) idx = n - 1;
     if (idx == (int)s_screen) return;
     s_screen = (uint8_t)idx;
+    s_last_page_ms = esp_timer_get_time() / 1000;
     ESP_LOGI(TAG, "screen %d of %d", idx + 1, n);
     build_tiles(lv_scr_act());
+    set_hdr_title();                /* each screen names its own endpoint */
     s_seen_gen = UINT32_MAX;        /* repaint from the next snapshot */
+}
+
+/*
+ * Auto-rotate: page to the next screen with something on it once the current
+ * one has been up for a dwell and nobody has touched the glass for as long.
+ *
+ * Any touch restarts the wait -- LVGL stamps the display's activity time on
+ * every press -- so reading a tile is never interrupted by the page leaving.
+ * It never runs under a sheet or the keyboard: build_tiles refuses to run
+ * under a modal, so paging then would leave the wrong tiles showing when it
+ * closed. The empty "new screen" page is never rotated to.
+ */
+static void rotate_tick(void)
+{
+    const cfg_device_t *dev = &config_get()->device;
+    if (!dev->rotate_enabled || modal_open() || ui_kbd_is_open()) return;
+
+    uint32_t dwell_ms = (uint32_t)dev->rotate_dwell_s * 1000;
+    if (lv_disp_get_inactive_time(NULL) < dwell_ms) return;
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now - s_last_page_ms < (int64_t)dwell_ms) return;
+
+    int used = screens_used();
+    int from = s_screen < used ? s_screen : used - 1;
+    for (int k = 1; k <= used; k++) {
+        int idx = (from + k) % used;
+        if (!screen_has_panels(idx)) continue;
+        if (idx != s_screen) go_to_screen(idx);
+        break;
+    }
+    /* Also when nothing moved, so a lone screen is not re-checked every tick
+     * and a second screen appearing waits a full dwell before rotation. */
+    s_last_page_ms = now;
 }
 
 static void gesture_cb(lv_event_t *e)
@@ -576,9 +628,8 @@ static void layouts_cb(lv_event_t *e)
  */
 static void set_hdr_title(void)
 {
-    const config_t *c = config_get();
-    const char *ep = (c->n_endpoints && c->endpoints[0].name[0])
-                     ? c->endpoints[0].name : "Prometheus Panel";
+    const cfg_endpoint_t *e = config_endpoint_by_id(config_screen_ep_for(s_screen));
+    const char *ep = (e && e->name[0]) ? e->name : "Prometheus Panel";
     const char *ly = config_active_layout();
     if (ly[0]) label_set_fmt_if_changed(s_hdr_title, "%s  \u2022  %s", ep, ly);
     else       label_set_if_changed(s_hdr_title, ep);
@@ -816,13 +867,11 @@ static void dashboard_tick(lv_timer_t *timer)
         build_tiles(lv_scr_act());
         s_seen_gen = UINT32_MAX;
         set_hdr_title();
-        const config_t *c = config_get();
-        if (c->n_endpoints) {
-            poller_set_endpoint(c->endpoints[0].url,
-                                c->endpoints[0].poll_s ? c->endpoints[0].poll_s
-                                                       : c->device.poll_default_s);
-        }
+        /* The poller notices the same generation itself, and re-reads every
+         * endpoint -- nothing to push to it from here. */
     }
+
+    rotate_tick();
 
     /* Started here rather than at boot: DNS cannot resolve a pool name before
      * the link is up, and a failed first attempt would not be retried until
@@ -849,9 +898,9 @@ static void dashboard_tick(lv_timer_t *timer)
     /*
      * Static, not a stack local, and taken ONCE.
      *
-     * poller_snap_t carries every watch slot -- ~2.5KB at 24 panels -- and
-     * this used to declare two of them on a 6KB LVGL task stack, which
-     * overflowed the moment the watch limit was raised from 8. It only ever
+     * poller_snap_t carries every watch slot and every endpoint's status --
+     * ~7KB -- and this used to declare two of them on the LVGL task stack,
+     * which overflowed the moment the watch limit was raised. It only ever
      * runs on the LVGL task, so a static is safe and free.
      */
     static poller_snap_t snap;
@@ -879,8 +928,8 @@ static void dashboard_tick(lv_timer_t *timer)
              * tile keeps what it last showed rather than flashing empty. */
             if (m == NULL) continue;
             tile_data_t d = {
-                .valid        = m->valid,
-                .warming      = m->warming,
+                .state        = (metric_state_t)m->state,
+                .seq          = m->seq,
                 .restarted    = m->restarted,
                 .value        = m->value,
                 .num          = m->num,
@@ -920,22 +969,30 @@ static void dashboard_tick(lv_timer_t *timer)
 
     /* The age readout has to keep counting even when no new data arrived, so
      * it is refreshed outside the generation check -- but from the same
-     * snapshot. */
-    if (snap.last_ok_ms > 0) {
-        int age = (int)((esp_timer_get_time() / 1000 - snap.last_ok_ms) / 1000);
+     * snapshot. It describes the endpoint THIS screen reads: another
+     * screen's exporter being down is not news about this one. */
+    const poller_ep_status_t *es =
+        poller_ep_status(&snap, config_screen_ep_for(s_screen));
+    if (es == NULL) {
+        label_set_if_changed(s_ftr_left, config_get()->n_endpoints
+                                         ? "starting" : "no endpoint configured");
+        text_color_if_changed(s_ftr_left, COL_WARN);
+    } else if (es->last_ok_ms > 0) {
+        int age = (int)((esp_timer_get_time() / 1000 - es->last_ok_ms) / 1000);
         /* The scrape figures live here, beside the status they describe,
          * rather than on the right where they crowded the memory readout
          * off the edge. */
         label_set_fmt_if_changed(s_ftr_left,
                                  "updated %ds ago   %s   %u samples  %u KB  %u ms",
-                                 age, snap.status,
-                                 (unsigned)snap.samples,
-                                 (unsigned)(snap.body_bytes / 1024),
-                                 (unsigned)snap.latency_ms);
+                                 age, es->status,
+                                 (unsigned)es->samples,
+                                 (unsigned)(es->body_bytes / 1024),
+                                 (unsigned)es->latency_ms);
+        text_color_if_changed(s_ftr_left, es->ok ? COL_DIM : COL_WARN);
     } else {
-        label_set_fmt_if_changed(s_ftr_left, "%s", snap.status);
+        label_set_fmt_if_changed(s_ftr_left, "%s", es->status);
+        text_color_if_changed(s_ftr_left, es->ok ? COL_DIM : COL_WARN);
     }
-    text_color_if_changed(s_ftr_left, snap.ok ? COL_DIM : COL_WARN);
 }
 
 /* -------------------------------------------------------------------- main */
@@ -945,6 +1002,8 @@ void app_main(void)
     /* First thing in the log after any spontaneous restart: why it happened
      * (4=panic 5=int_wdt 6=task_wdt 9=brownout) */
     ESP_LOGW(TAG, "reset reason: %d", (int)esp_reset_reason());
+    /* The serial heartbeat, and the CPU figures /status reports. */
+    sysmon_start();
 
     cJSON_Hooks hooks = { .malloc_fn = psram_prefer_malloc, .free_fn = free };
     cJSON_InitHooks(&hooks);
@@ -989,21 +1048,13 @@ void app_main(void)
              * dashboard that cannot possibly have data. */
             ui_setup_open(browser_closed);
         }
-        /* Created regardless of which screen is up: the heartbeat is the only
-         * way to see this device's state over serial, since the native-USB
-         * console loses everything printed before a host attaches. */
         lvgl_port_unlock();
     }
 
-    if (secrets_have_wifi()) {
-        const config_t *c = config_get();
-        const char *url = c->n_endpoints ? c->endpoints[0].url : "";
-        int interval = c->n_endpoints && c->endpoints[0].poll_s
-                     ? c->endpoints[0].poll_s : c->device.poll_default_s;
-        poller_start(url, interval);
-        if (url[0] == '\0') {
-            ESP_LOGW(TAG, "no endpoint configured; use the gear button");
-        }
+    /* Unconditionally: it waits for Wi-Fi itself, and a panel set up through
+     * the first-boot wizard has no credentials yet at this point. */
+    if (poller_start() != ESP_OK) {
+        ESP_LOGE(TAG, "the poller did not start");
     }
 
     if (secrets_have_wifi() && webcfg_start() != ESP_OK) {

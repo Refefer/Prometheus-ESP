@@ -63,7 +63,10 @@ static const tile_vt_t *vt_for_span(tile_kind_t kind, uint8_t w, uint8_t h)
 
 static severity_t severity_of(const tile_spec_t *spec, const tile_data_t *d)
 {
-    if (!d->valid) return SEV_STALE;
+    /* A metric the endpoint does not expose will not fix itself by waiting,
+     * unlike one warming up -- so it is flagged, not greyed out. */
+    if (d->state == MS_MISSING) return SEV_WARN;
+    if (d->state != MS_OK) return SEV_STALE;
     if (isnan(spec->crit) && isnan(spec->warn)) return SEV_OK;
 
     float v = d->value;
@@ -171,11 +174,23 @@ tile_inst_t *tile_create(lv_obj_t *parent, const tile_spec_t *spec)
     return t;
 }
 
+const char *tile_state_caption(const tile_data_t *d)
+{
+    switch (d->state) {
+    case MS_WARMING: return "warming up";
+    case MS_MISSING: return "not on endpoint";
+    case MS_NO_DATA: return "no data";
+    case MS_OK:
+    default:         return "";
+    }
+}
+
 void tile_update(tile_inst_t *t, const tile_data_t *d)
 {
     if (t == NULL || d == NULL) return;
 
-    if (d->valid && isfinite(d->value)) {
+    if (d->state == MS_OK && isfinite(d->value) && d->seq != t->last_seq) {
+        t->last_seq = d->seq;
         if (t->hist_n < TILE_HIST_MAX) {
             t->hist[t->hist_n++] = d->value;
         } else {

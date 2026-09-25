@@ -20,11 +20,6 @@
 
 static const char *TAG = "poller";
 
-/* Enough samples to span the longest offered window at the fastest poll: 15
- * minutes at 2s would need 450, so the ring is capped and the effective
- * window is simply as much history as it holds. */
-#define RATE_WIN_MAX 24
-
 /*
  * The watch list, rebuilt from the stored panels.
  *
@@ -34,6 +29,15 @@ static const char *TAG = "poller";
  */
 typedef struct {
     uint16_t     panel_id;
+    /* Which endpoint feeds this watch: its index in s_ep, and enough about
+     * the endpoint to tell whether a reload changed where the data comes
+     * from -- a baseline measured against another host is not a baseline. */
+    uint8_t      ep_idx;
+    uint16_t     ep_id;
+    uint32_t     ep_url_hash;
+    /* True when reload carried every term's state over, so the row already
+     * in the snapshot is still about this watch's numbers. */
+    bool         carried;
     char         label[POLLER_NAME_MAX];
     fmt_mode_t   fmt;
     char         unit[8];
@@ -74,16 +78,43 @@ typedef struct {
     double       sc_child_value[POLLER_MAX_CHILDREN];
 } watch_rt_t;
 
-/* PSRAM: ~85KB of term state has no business in the internal heap. */
+/* PSRAM: two lists of ~10.8KB watches, ~260KB in all, has no business in the
+ * internal heap. */
 static watch_rt_t *s_watch;
 static watch_rt_t *s_watch_prev;
 static int         s_watch_n;
 
+/*
+ * The endpoints being polled, rebuilt with the watch list. Each keeps its own
+ * schedule and backoff, so a dead exporter slows only its own screens. Index
+ * i also names keep-alive slot i. PSRAM, like the watches.
+ */
+typedef struct {
+    uint16_t id;
+    char     url[CFG_URL_MAX];
+    uint32_t url_hash;
+    uint16_t interval_s;
+    uint16_t timeout_ms;
+    int64_t  next_due_ms;
+    uint32_t fail_streak;
+    uint8_t  n_watches;
+    /* New, or its URL changed in the last reload: whatever status it had is
+     * about another target. */
+    bool     retargeted;
+} ep_rt_t;
+
+static ep_rt_t *s_ep;
+static int      s_ep_n;
+/* The endpoint being scraped right now; on_sample only feeds its watches. */
+static int      s_cur_ep = -1;
+
 static SemaphoreHandle_t s_mux;
 static poller_snap_t     s_snap;
-static char              s_url[160];
 static uint32_t          s_cfg_gen;
-static int               s_interval_s = 10;
+static uint32_t          s_seq;
+static TaskHandle_t      s_task;
+/* Reload scratch for re-ordering snapshot rows to match the new watch list. */
+static poller_metric_t  *s_rows_tmp;
 
 /*
  * poller_snap_t is passed around by value in places and has twice now grown
@@ -97,7 +128,6 @@ _Static_assert(sizeof(poller_snap_t) < 12 * 1024,
 static void reload_watches(void);
 /* Set from any task; acted on by the scrape loop, which owns s_watch. */
 static volatile bool s_reload_req;
-static volatile bool s_wipe_req;
 
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
@@ -236,6 +266,7 @@ static bool on_sample(void *ctx, const prom_sample_t *s)
     (void)ctx;
     for (int i = 0; i < s_watch_n; i++) {
         watch_rt_t *w = &s_watch[i];
+        if (w->ep_idx != s_cur_ep) continue;
 
         for (int k = 0; k < w->n_terms; k++) {
             term_rt_t *tm = &w->terms[k];
@@ -364,7 +395,8 @@ static bool win_step(win_ring_t *w, double v, int64_t t, uint16_t window_s,
  * that total. For counters that is the right order: summing rates and rating
  * sums agree, but rating the sum survives a series appearing mid-window.
  */
-static double term_value(term_rt_t *tm, int64_t t, bool *warming, bool *restarted)
+static double term_value(term_rt_t *tm, int64_t t, int64_t max_gap_ms,
+                         bool *warming, bool *restarted)
 {
     if (tm->q > 0.0f) {
         if (tm->nb < 2) return NAN;
@@ -428,243 +460,312 @@ static double term_value(term_rt_t *tm, int64_t t, bool *warming, bool *restarte
     }
 
     float r = 0;
-    rate_status_t rc = prom_rate_step(&tm->rate, prom_num(v), t,
-                                      (int64_t)s_interval_s * 3000, &r);
+    rate_status_t rc = prom_rate_step(&tm->rate, prom_num(v), t, max_gap_ms, &r);
     if (rc == RATE_OK)      return r;
     if (rc == RATE_RESET)   { *restarted = true; return NAN; }
     if (rc == RATE_WARMING) { *warming = true; }
     return NAN;
 }
 
-static void publish(bool ok, const char *status, uint32_t latency_ms,
-                    const prom_text_stats_t *st, uint64_t bytes)
+/* The fields of a row that describe the panel rather than its numbers. */
+static void row_presentation(const watch_rt_t *w, poller_metric_t *m)
+{
+    m->panel_id = w->panel_id;
+    m->scale    = w->scale;
+    m->group    = w->group;
+    m->peak     = (float)w->peak;
+    m->seen_fraction = w->fmt_state.seen_fraction;
+    strncpy(m->label, w->label, sizeof(m->label) - 1);
+    m->label[sizeof(m->label) - 1] = '\0';
+    strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
+    m->unit[sizeof(m->unit) - 1] = '\0';
+    m->fmt = (uint8_t)w->fmt;
+}
+
+/*
+ * One watch's row from the scrape that just finished. Everything that was in
+ * the row before is replaced, so a row never mixes this scrape with the last.
+ */
+static void compute_row(watch_rt_t *w, poller_metric_t *m, int64_t t,
+                        int64_t max_gap_ms)
+{
+    memset(m, 0, sizeof(*m));
+    row_presentation(w, m);
+
+    bool warming = false, restarted = false;
+    double shown = NAN;
+
+    /* The scrape worked; a term that matched nothing is a metric this
+     * endpoint does not expose, which is a different fault from one that
+     * has not warmed up. */
+    bool missing = false;
+    for (int k = 0; k < w->n_terms; k++) {
+        if (!w->terms[k].seen) missing = true;
+    }
+
+    if (w->multi && w->sc_n_child > 0) {
+        term_rt_t *t0 = &w->terms[0];
+        for (int k = 0; k < w->sc_n_child; k++) {
+            int slot = -1;
+            for (int j = 0; j < w->n_child; j++) {
+                if (strcmp(w->child_key[j], w->sc_child_label[k]) == 0) {
+                    slot = j; break;
+                }
+            }
+            if (slot < 0 && w->n_child < POLLER_MAX_CHILDREN) {
+                slot = w->n_child++;
+                strncpy(w->child_key[slot], w->sc_child_label[k],
+                        POLLER_CHILD_LABEL - 1);
+            }
+
+            double cv = NAN;
+            if (t0->agg == AGG_RATE && slot >= 0) {
+                float r = 0;
+                /*
+                 * The same window the panel asks for. This used to be a
+                 * plain per-poll rate whatever window_s said, which on a
+                 * counter that steps at its exporter's log interval reads
+                 * as a spike then exactly zero, over and over.
+                 */
+                if (t0->window_s > 0) {
+                    if (win_step(&w->child_win[slot], w->sc_child_value[k],
+                                 t, t0->window_s, &r, NULL)) cv = r;
+                } else if (prom_rate_step(&w->child_rate[slot],
+                                   prom_num(w->sc_child_value[k]), t,
+                                   max_gap_ms, &r) == RATE_OK) {
+                    cv = r;
+                }
+            } else {
+                cv = w->sc_child_value[k];
+            }
+
+            strncpy(m->child_label[k], w->sc_child_label[k],
+                    POLLER_CHILD_LABEL - 1);
+            m->child_value[k] = isfinite(cv) ? (float)cv : 0.0f;
+            if (isfinite(cv)) {
+                fmt_state_t fs = {0};
+                char suf[12]; bool numeric;
+                fmt_style_t csy = { w->fmt, w->unit, w->scale, w->group,
+                                    w->prefix, w->suffix };
+                ui_fmt_value(cv, &csy, &fs,
+                             m->child_num[k], sizeof(m->child_num[k]),
+                             suf, sizeof(suf), &numeric);
+            } else {
+                strncpy(m->child_num[k], "--", sizeof(m->child_num[k]) - 1);
+            }
+        }
+        m->n_children = w->sc_n_child;
+        m->n_matched  = w->sc_n_matched ? w->sc_n_matched : w->sc_n_child;
+
+        /* Rank by value but hold the order for about a minute: re-sorting
+         * every poll makes rows leapfrog and you cannot follow one long
+         * enough to read it. */
+        if (w->resort_in == 0) {
+            for (int a = 1; a < m->n_children; a++) {
+                uint8_t keyi = (uint8_t)a;
+                int b = a - 1;
+                while (b >= 0 &&
+                       m->child_value[w->order[b]] < m->child_value[keyi]) {
+                    w->order[b + 1] = w->order[b];
+                    b--;
+                }
+                w->order[b + 1] = keyi;
+            }
+            w->resort_in = 12;
+        } else {
+            w->resort_in--;
+        }
+        for (int a = 0; a < m->n_children; a++) {
+            if (w->order[a] >= m->n_children) w->order[a] = (uint8_t)a;
+            m->child_order[a] = w->order[a];
+        }
+
+        double sum = 0;
+        for (int k = 0; k < m->n_children; k++) sum += m->child_value[k];
+        shown = sum;
+    } else {
+        double v[CFG_MAX_TERMS];
+        for (int k = 0; k < w->n_terms; k++) {
+            v[k] = term_value(&w->terms[k], t, max_gap_ms, &warming, &restarted);
+        }
+
+        switch (w->op) {
+        case OP_SHARE: {
+            double d = v[0] + v[1];
+            /* Both idle is "nothing happened", not 0% -- a hit rate
+             * reading zero on a quiet service would be read as a fault. */
+            shown = (isfinite(v[0]) && isfinite(v[1]) && d != 0.0)
+                  ? v[0] / d : NAN;
+            break;
+        }
+        case OP_RATIO:
+            shown = (isfinite(v[0]) && isfinite(v[1]) && v[1] != 0.0)
+                  ? v[0] / v[1] : NAN;
+            break;
+        case OP_DIFF:
+            shown = (isfinite(v[0]) && isfinite(v[1])) ? v[0] - v[1] : NAN;
+            break;
+        case OP_SUM: {
+            double acc = 0;
+            bool any = false;
+            for (int k = 0; k < w->n_terms; k++) {
+                if (isfinite(v[k])) { acc += v[k]; any = true; }
+            }
+            shown = any ? acc : NAN;
+            break;
+        }
+        case OP_NONE:
+        default:
+            shown = v[0];
+            break;
+        }
+
+        /* Histogram distribution, for the tile that draws one. */
+        term_rt_t *t0 = &w->terms[0];
+        if (w->op == OP_NONE && t0->q > 0.0f && t0->nb >= 2) {
+            m->p50 = (float)prom_hist_quantile(0.50, t0->le, t0->cum, t0->nb);
+            m->p90 = (float)prom_hist_quantile(0.90, t0->le, t0->cum, t0->nb);
+            m->p99 = (float)prom_hist_quantile(0.99, t0->le, t0->cum, t0->nb);
+            double total = t0->cum[t0->nb - 1];
+            if (total > 0) {
+                int keep = t0->nb < POLLER_MAX_BUCKETS ? t0->nb
+                                                       : POLLER_MAX_BUCKETS;
+                double prev = 0;
+                for (int b = 0; b < keep; b++) {
+                    bool last = (b == keep - 1);
+                    double cum = last ? total : t0->cum[b];
+                    m->bucket_le[b]    = last ? (float)INFINITY : (float)t0->le[b];
+                    m->bucket_share[b] = (float)((cum - prev) / total);
+                    prev = cum;
+                }
+                m->n_buckets = (uint8_t)keep;
+                m->has_hist  = true;
+            }
+        }
+    }
+
+    m->restarted = restarted;
+
+    if (isfinite(shown)) {
+        bool numeric = true;
+        fmt_style_t vsy = { w->fmt, w->unit, w->scale, w->group,
+                            w->prefix, w->suffix };
+        ui_fmt_value(shown, &vsy, &w->fmt_state,
+                     m->num, sizeof(m->num),
+                     m->suffix, sizeof(m->suffix), &numeric);
+        /*
+         * The DISPLAYED quantity, in every mode.
+         *
+         * Percent was already converted here and a per-hour rate was not,
+         * so a chart of an hourly panel plotted per-second numbers while
+         * the headline above it read per-hour -- the same series, an axis
+         * 3600x out. Anything reading m->value (charts, gauge and bar
+         * ranges, the peak) wants what the tile says, not what the
+         * formatter will later turn it into.
+         */
+        double disp = shown;
+        if (w->fmt == FMT_PCT_01)         disp = shown * 100.0;
+        else if (w->fmt == FMT_RATE_HOUR) disp = shown * 3600.0;
+        m->value = (float)disp;
+        if (isfinite(m->value) && m->value > w->peak) w->peak = m->value;
+        m->peak = (float)w->peak;
+        m->seen_fraction = w->fmt_state.seen_fraction;
+        m->numeric_only = numeric;
+        m->state = MS_OK;
+        m->seq = ++s_seq;
+    } else if (missing) {
+        m->state = MS_MISSING;
+    } else if (warming || restarted) {
+        m->state = MS_WARMING;
+    } else {
+        m->state = MS_NO_DATA;
+    }
+}
+
+static const char *state_word(const poller_metric_t *m)
+{
+    switch (m->state) {
+    case MS_OK:      return m->num;
+    case MS_WARMING: return m->restarted ? "restarted" : "warming";
+    case MS_MISSING: return "missing";
+    default:         return "--";
+    }
+}
+
+/*
+ * Commit one endpoint's scrape.
+ *
+ * Only that endpoint's rows are recomputed; every other row is carried as it
+ * stands, because another endpoint's numbers did not change just because this
+ * one was scraped. Rows are kept in watch order (reload_watches re-orders the
+ * snapshot to match), so row i is watch i throughout.
+ *
+ * `ei` < 0 publishes a status to every endpoint without scraping any -- the
+ * "waiting for wi-fi" case.
+ */
+static void publish_ep(int ei, bool ok, const char *status, uint32_t latency_ms,
+                       const prom_text_stats_t *st, uint64_t bytes)
 {
     /*
      * Static, not a stack local: poller_snap_t carries every watch slot and
-     * grew past this task's 8KB stack once already. publish() only ever runs
-     * on the poller task.
+     * grew past this task's 8KB stack once already. Only the poller task
+     * ever runs this.
      */
     static poller_snap_t next;
-    memset(&next, 0, sizeof(next));
-    next.n          = s_watch_n;
-    next.ok         = ok;
-    next.latency_ms = latency_ms;
-    next.samples    = st ? st->samples : 0;
-    next.body_bytes = bytes;
-    strncpy(next.status, status, sizeof(next.status) - 1);
+    if (xSemaphoreTake(s_mux, portMAX_DELAY) != pdTRUE) return;
+    next = s_snap;
+    xSemaphoreGive(s_mux);
 
     int64_t t = now_ms();
 
-    for (int i = 0; i < s_watch_n; i++) {
+    for (int i = 0; i < s_watch_n && i < POLLER_MAX_WATCH; i++) {
         watch_rt_t      *w = &s_watch[i];
         poller_metric_t *m = &next.m[i];
-        m->panel_id = w->panel_id;
-        m->scale    = w->scale;
-        m->group    = w->group;
-        m->peak     = (float)w->peak;
-        m->seen_fraction = w->fmt_state.seen_fraction;
-        strncpy(m->label, w->label, sizeof(m->label) - 1);
-        strncpy(m->unit, w->unit, sizeof(m->unit) - 1);
-        m->fmt = (uint8_t)w->fmt;
-
-        if (!ok) continue;
-
-        bool warming = false, restarted = false;
-        double shown = NAN;
-
-        if (w->multi && w->sc_n_child > 0) {
-            term_rt_t *t0 = &w->terms[0];
-            for (int k = 0; k < w->sc_n_child; k++) {
-                int slot = -1;
-                for (int j = 0; j < w->n_child; j++) {
-                    if (strcmp(w->child_key[j], w->sc_child_label[k]) == 0) {
-                        slot = j; break;
-                    }
-                }
-                if (slot < 0 && w->n_child < POLLER_MAX_CHILDREN) {
-                    slot = w->n_child++;
-                    strncpy(w->child_key[slot], w->sc_child_label[k],
-                            POLLER_CHILD_LABEL - 1);
-                }
-
-                double cv = NAN;
-                if (t0->agg == AGG_RATE && slot >= 0) {
-                    float r = 0;
-                    /*
-                     * The same window the panel asks for. This used to be a
-                     * plain per-poll rate whatever window_s said, which on a
-                     * counter that steps at its exporter's log interval reads
-                     * as a spike then exactly zero, over and over.
-                     */
-                    if (t0->window_s > 0) {
-                        if (win_step(&w->child_win[slot], w->sc_child_value[k],
-                                     t, t0->window_s, &r, NULL)) cv = r;
-                    } else if (prom_rate_step(&w->child_rate[slot],
-                                       prom_num(w->sc_child_value[k]), t,
-                                       (int64_t)s_interval_s * 3000, &r) == RATE_OK) {
-                        cv = r;
-                    }
-                } else {
-                    cv = w->sc_child_value[k];
-                }
-
-                strncpy(m->child_label[k], w->sc_child_label[k],
-                        POLLER_CHILD_LABEL - 1);
-                m->child_value[k] = isfinite(cv) ? (float)cv : 0.0f;
-                if (isfinite(cv)) {
-                    fmt_state_t fs = {0};
-                    char suf[12]; bool numeric;
-                    fmt_style_t csy = { w->fmt, w->unit, w->scale, w->group,
-                                        w->prefix, w->suffix };
-                    ui_fmt_value(cv, &csy, &fs,
-                                 m->child_num[k], sizeof(m->child_num[k]),
-                                 suf, sizeof(suf), &numeric);
-                } else {
-                    strncpy(m->child_num[k], "--", sizeof(m->child_num[k]) - 1);
-                }
-            }
-            m->n_children = w->sc_n_child;
-            m->n_matched  = w->sc_n_matched ? w->sc_n_matched : w->sc_n_child;
-
-            /* Rank by value but hold the order for about a minute: re-sorting
-             * every poll makes rows leapfrog and you cannot follow one long
-             * enough to read it. */
-            if (w->resort_in == 0) {
-                for (int a = 1; a < m->n_children; a++) {
-                    uint8_t keyi = (uint8_t)a;
-                    int b = a - 1;
-                    while (b >= 0 &&
-                           m->child_value[w->order[b]] < m->child_value[keyi]) {
-                        w->order[b + 1] = w->order[b];
-                        b--;
-                    }
-                    w->order[b + 1] = keyi;
-                }
-                w->resort_in = 12;
-            } else {
-                w->resort_in--;
-            }
-            for (int a = 0; a < m->n_children; a++) {
-                if (w->order[a] >= m->n_children) w->order[a] = (uint8_t)a;
-                m->child_order[a] = w->order[a];
-            }
-
-            double sum = 0;
-            for (int k = 0; k < m->n_children; k++) sum += m->child_value[k];
-            shown = sum;
+        if (ei >= 0 && w->ep_idx != ei) continue;
+        if (ok && ei >= 0) {
+            int64_t gap = (int64_t)s_ep[ei].interval_s * 3000;
+            compute_row(w, m, t, gap);
         } else {
-            double v[CFG_MAX_TERMS];
-            for (int k = 0; k < w->n_terms; k++) {
-                v[k] = term_value(&w->terms[k], t, &warming, &restarted);
-            }
-
-            switch (w->op) {
-            case OP_SHARE: {
-                double d = v[0] + v[1];
-                /* Both idle is "nothing happened", not 0% -- a hit rate
-                 * reading zero on a quiet service would be read as a fault. */
-                shown = (isfinite(v[0]) && isfinite(v[1]) && d != 0.0)
-                      ? v[0] / d : NAN;
-                break;
-            }
-            case OP_RATIO:
-                shown = (isfinite(v[0]) && isfinite(v[1]) && v[1] != 0.0)
-                      ? v[0] / v[1] : NAN;
-                break;
-            case OP_DIFF:
-                shown = (isfinite(v[0]) && isfinite(v[1])) ? v[0] - v[1] : NAN;
-                break;
-            case OP_SUM: {
-                double acc = 0;
-                bool any = false;
-                for (int k = 0; k < w->n_terms; k++) {
-                    if (isfinite(v[k])) { acc += v[k]; any = true; }
-                }
-                shown = any ? acc : NAN;
-                break;
-            }
-            case OP_NONE:
-            default:
-                shown = v[0];
-                break;
-            }
-
-            /* Histogram distribution, for the tile that draws one. */
-            term_rt_t *t0 = &w->terms[0];
-            if (w->op == OP_NONE && t0->q > 0.0f && t0->nb >= 2) {
-                m->p50 = (float)prom_hist_quantile(0.50, t0->le, t0->cum, t0->nb);
-                m->p90 = (float)prom_hist_quantile(0.90, t0->le, t0->cum, t0->nb);
-                m->p99 = (float)prom_hist_quantile(0.99, t0->le, t0->cum, t0->nb);
-                double total = t0->cum[t0->nb - 1];
-                if (total > 0) {
-                    int keep = t0->nb < POLLER_MAX_BUCKETS ? t0->nb
-                                                           : POLLER_MAX_BUCKETS;
-                    double prev = 0;
-                    for (int b = 0; b < keep; b++) {
-                        bool last = (b == keep - 1);
-                        double cum = last ? total : t0->cum[b];
-                        m->bucket_le[b]    = last ? (float)INFINITY : (float)t0->le[b];
-                        m->bucket_share[b] = (float)((cum - prev) / total);
-                        prev = cum;
-                    }
-                    m->n_buckets = (uint8_t)keep;
-                    m->has_hist  = true;
-                }
-            }
-        }
-
-        m->warming   = warming;
-        m->restarted = restarted;
-
-        if (isfinite(shown)) {
-            bool numeric = true;
-            fmt_style_t vsy = { w->fmt, w->unit, w->scale, w->group,
-                                w->prefix, w->suffix };
-            ui_fmt_value(shown, &vsy, &w->fmt_state,
-                         m->num, sizeof(m->num),
-                         m->suffix, sizeof(m->suffix), &numeric);
-            /*
-             * The DISPLAYED quantity, in every mode.
-             *
-             * Percent was already converted here and a per-hour rate was not,
-             * so a chart of an hourly panel plotted per-second numbers while
-             * the headline above it read per-hour -- the same series, an axis
-             * 3600x out. Anything reading m->value (charts, gauge and bar
-             * ranges, the peak) wants what the tile says, not what the
-             * formatter will later turn it into.
-             */
-            double disp = shown;
-            if (w->fmt == FMT_PCT_01)         disp = shown * 100.0;
-            else if (w->fmt == FMT_RATE_HOUR) disp = shown * 3600.0;
-            m->value = (float)disp;
-            if (isfinite(m->value) && m->value > w->peak) w->peak = m->value;
-            m->numeric_only = numeric;
-            m->valid = true;
+            memset(m, 0, sizeof(*m));
+            row_presentation(w, m);
+            m->state = MS_NO_DATA;
         }
     }
+    next.n = s_watch_n;
 
-    if (esp_log_level_get(TAG) >= ESP_LOG_INFO && ok) {
+    if (ei >= 0 && ok && esp_log_level_get(TAG) >= ESP_LOG_INFO) {
         char line[256]; size_t w = 0;
         line[0] = '\0';
         for (int i = 0; i < s_watch_n && w < sizeof(line) - 1; i++) {
+            if (s_watch[i].ep_idx != ei) continue;
             const poller_metric_t *m = &next.m[i];
+            bool v = m->state == MS_OK;
             int n = snprintf(line + w, sizeof(line) - w, "%s=%s%s%s  ",
-                             m->label,
-                             m->valid ? m->num
-                                      : (m->restarted ? "restarted"
-                                         : m->warming ? "warming" : "--"),
-                             m->valid && m->suffix[0] ? " " : "",
-                             m->valid ? m->suffix : "");
+                             m->label, state_word(m),
+                             v && m->suffix[0] ? " " : "",
+                             v ? m->suffix : "");
             if (n < 0) break;
             w += (size_t)n;
         }
-        if (line[0]) ESP_LOGI(TAG, "%s", line);
+        if (line[0]) ESP_LOGI(TAG, "[%s] %s", s_ep[ei].url, line);
+    }
+
+    for (int e = 0; e < next.n_ep; e++) {
+        if (ei >= 0 && e != ei) continue;
+        poller_ep_status_t *es = &next.ep[e];
+        es->ok = ok;
+        strncpy(es->status, status, sizeof(es->status) - 1);
+        es->status[sizeof(es->status) - 1] = '\0';
+        if (ei < 0) continue;              /* a status, not a scrape */
+        es->latency_ms  = latency_ms;
+        es->samples     = st ? st->samples : 0;
+        es->body_bytes  = bytes;
+        es->fail_streak = s_ep[e].fail_streak;
+        if (ok) es->last_ok_ms = t;
     }
 
     if (xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
-        next.generation  = s_snap.generation + 1;
-        next.fail_streak = ok ? 0 : s_snap.fail_streak + 1;
-        next.last_ok_ms  = ok ? t : s_snap.last_ok_ms;
+        next.generation = s_snap.generation + 1;
         s_snap = next;
         xSemaphoreGive(s_mux);
     }
@@ -672,61 +773,78 @@ static void publish(bool ok, const char *status, uint32_t latency_ms,
 
 /* -------------------------------------------------------------------- task */
 
-void poller_set_endpoint(const char *url, int interval_s)
+/* Scrape one endpoint, commit it, and schedule its next turn. */
+static void scrape_ep(int ei, prom_text_parser_t *parser)
 {
-    if (url == NULL) return;
-    int want = interval_s > 0 ? interval_s : 10;
+    ep_rt_t *ep = &s_ep[ei];
 
-    /*
-     * Retargeting to the target you are already on is not a retarget.
-     *
-     * The dashboard calls this on every config change, because it cannot know
-     * whether the endpoint was among the things that changed. The wipe below
-     * is right when the target really changed and catastrophic when it did
-     * not: it discards every baseline and every window on the device, so
-     * renaming one tile used to cost every tile its history -- including an
-     * hour-long window that then needs another hour.
-     */
-    if (strcmp(s_url, url) == 0 && s_interval_s == want) return;
-
-    if (s_mux && xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
-        strncpy(s_url, url, sizeof(s_url) - 1);
-        s_url[sizeof(s_url) - 1] = '\0';
-        s_interval_s = want;
-        s_snap.fail_streak = 0;      /* a new target starts with a clean slate */
-        xSemaphoreGive(s_mux);
-    } else {
-        strncpy(s_url, url, sizeof(s_url) - 1);
-        s_interval_s = want;
-    }
-    /* The cached connection belongs to the old host. */
-    http_drop_slot(0);
-    /*
-     * Rates measured against the old target are meaningless for the new one,
-     * but the wipe happens on the scrape loop rather than here: this runs on
-     * the LVGL task, and s_watch belongs to the task that reads it.
-     */
-    s_wipe_req = true;
-    ESP_LOGI(TAG, "endpoint set to %s every %ds", url, s_interval_s);
-}
-
-/* Poller task only. See poller_set_endpoint. */
-static void wipe_baselines(void)
-{
+    /* Clear only this endpoint's per-scrape accumulation; baselines and rings
+     * carry over, which is the whole point of them. */
     for (int i = 0; i < s_watch_n; i++) {
         watch_rt_t *w = &s_watch[i];
-        memset(&w->fmt_state, 0, sizeof(w->fmt_state));
-        memset(w->child_win, 0, sizeof(w->child_win));
+        if (w->ep_idx != ei) continue;
+        w->sc_n_child = w->sc_n_matched = 0;
         for (int k = 0; k < w->n_terms; k++) {
             term_rt_t *tm = &w->terms[k];
-            memset(&tm->rate, 0, sizeof(tm->rate));
-            memset(&tm->win, 0, sizeof(tm->win));
-            tm->base_nb = 0;
+            tm->acc = 0; tm->n_acc = 0; tm->seen = false; tm->nb = 0;
         }
     }
+    prom_text_reset(parser);
+
+    s_cur_ep = ei;
+    http_result_t res;
+    http_get_stream(ei, ep->url, NULL, feed_chunk, parser,
+                    ep->timeout_ms ? ep->timeout_ms : 8000, &res);
+    prom_text_stats_t st;
+    prom_text_finish(parser, &st);
+    s_cur_ep = -1;
+
+    bool ok = res.klass == HTTP_ERR_NONE && st.samples > 0;
+    ep->fail_streak = ok ? 0 : ep->fail_streak + 1;
+
+    if (ok) {
+        publish_ep(ei, true, "ok", res.duration_ms, &st, res.bytes);
+        /* Heap alongside size: the whole claim of a streaming parser is
+         * that these two numbers are unrelated. */
+        ESP_LOGI(TAG, "scrape ok: %s %u samples, %u bytes, %ums  "
+                      "SRAM %uK PSRAM %uK", ep->url,
+                 (unsigned)st.samples, (unsigned)res.bytes,
+                 (unsigned)res.duration_ms,
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    } else if (res.klass == HTTP_ERR_NONE) {
+        /* 200 with nothing parseable almost always means the URL points
+         * at a web page rather than an exporter. */
+        publish_ep(ei, false, "no metrics found", res.duration_ms, &st, res.bytes);
+        ESP_LOGW(TAG, "%s: 200 but 0 samples from %u bytes", ep->url,
+                 (unsigned)res.bytes);
+    } else {
+        publish_ep(ei, false, http_err_text(res.klass), res.duration_ms, &st,
+                   res.bytes);
+    }
+
+    /* Per-endpoint backoff, so one exporter that is down is asked less often
+     * without slowing anyone else's screens. */
+    uint32_t wait_ms = (uint32_t)ep->interval_s * 1000;
+    if (ep->fail_streak > 0) {
+        uint32_t shift = ep->fail_streak > 5 ? 5 : ep->fail_streak;
+        wait_ms <<= shift;
+        if (wait_ms > 300000) wait_ms = 300000;
+    }
+    ep->next_due_ms = now_ms() + wait_ms;
 }
 
-const char *poller_url(void) { return s_url; }
+/*
+ * Sleep until `ms` from now at most, waking early on a reload request. Capped
+ * so Wi-Fi and config changes are noticed within a second whatever the poll
+ * interval is.
+ */
+static void wait_or_wake(int64_t ms)
+{
+    if (ms > 1000) ms = 1000;
+    if (ms < 1) ms = 1;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(ms));
+}
 
 static void poller_task(void *arg)
 {
@@ -745,11 +863,6 @@ static void poller_task(void *arg)
     }
 
     for (;;) {
-        /*
-         * WiFi down is not an endpoint failure: skip entirely rather than
-         * burning the failure streak, so a brief outage does not leave the
-         * endpoint in a long backoff once the link returns.
-         */
         /* A pushed config lands on the HTTP task; picking it up here means the
          * watch list is only ever rewritten by the task that reads it. */
         uint32_t g = config_generation();
@@ -758,16 +871,25 @@ static void poller_task(void *arg)
             s_reload_req = false;
             reload_watches();
         }
-        if (s_wipe_req) { s_wipe_req = false; wipe_baselines(); }
 
+        /*
+         * WiFi down is not an endpoint failure: skip entirely rather than
+         * burning the failure streaks, so a brief outage does not leave every
+         * endpoint in a long backoff once the link returns.
+         */
         if (!wifi_mgr_is_connected()) {
-            publish(false, "waiting for wi-fi", 0, NULL, 0);
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            publish_ep(-1, false, "waiting for wi-fi", 0, NULL, 0);
+            wait_or_wake(1000);
             continue;
         }
 
-        if (s_url[0] == '\0') {
-            publish(false, "no endpoint configured", 0, NULL, 0);
+        int pick = -1;
+        for (int e = 0; e < s_ep_n; e++) {
+            if (s_ep[e].n_watches == 0) continue;   /* no screen uses it */
+            if (pick < 0 || s_ep[e].next_due_ms < s_ep[pick].next_due_ms) pick = e;
+        }
+
+        if (pick < 0) {
             /*
              * Rate-limited, but present: an idle device that logs nothing at
              * all is indistinguishable over serial from a hung one, and this
@@ -775,85 +897,37 @@ static void poller_task(void *arg)
              */
             static int quiet;
             if (quiet++ % 30 == 0) {
-                ESP_LOGW(TAG, "no endpoint configured -- set one with the "
-                              "gear button (SRAM %uK PSRAM %uK)",
-                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+                ESP_LOGW(TAG, "%s", s_ep_n ? "no tiles on any endpoint yet"
+                                           : "no endpoint configured -- set "
+                                             "one with the gear button");
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            wait_or_wake(1000);
             continue;
         }
 
-        /* Clear only the per-scrape accumulation; baselines and rings carry
-         * over, which is the whole point of them. */
-        for (int i = 0; i < s_watch_n; i++) {
-            watch_rt_t *w = &s_watch[i];
-            w->sc_n_child = w->sc_n_matched = 0;
-            for (int k = 0; k < w->n_terms; k++) {
-                term_rt_t *tm = &w->terms[k];
-                tm->acc = 0; tm->n_acc = 0; tm->seen = false; tm->nb = 0;
-            }
+        int64_t due_in = s_ep[pick].next_due_ms - now_ms();
+        if (due_in > 0) {
+            wait_or_wake(due_in);
+            continue;
         }
-        prom_text_reset(parser);
-
-        http_result_t res;
-        http_get_stream(0, s_url, NULL, feed_chunk, parser, 8000, &res);
-
-        prom_text_stats_t st;
-        prom_text_finish(parser, &st);
-
-        if (res.klass == HTTP_ERR_NONE && st.samples > 0) {
-            publish(true, "ok", res.duration_ms, &st, res.bytes);
-            /* Heap alongside size: the whole claim of a streaming parser is
-             * that these two numbers are unrelated. */
-            ESP_LOGI(TAG, "scrape ok: %u samples, %u bytes, %ums  "
-                          "SRAM %uK PSRAM %uK",
-                     (unsigned)st.samples, (unsigned)res.bytes,
-                     (unsigned)res.duration_ms,
-                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-        } else if (res.klass == HTTP_ERR_NONE) {
-            /* 200 with nothing parseable almost always means the URL points
-             * at a web page rather than an exporter. */
-            publish(false, "no metrics found", res.duration_ms, &st, res.bytes);
-            ESP_LOGW(TAG, "200 but 0 samples from %u bytes", (unsigned)res.bytes);
-        } else {
-            publish(false, http_err_text(res.klass), res.duration_ms, &st, res.bytes);
-        }
-
-        uint32_t wait_ms = (uint32_t)s_interval_s * 1000;
-        uint32_t streak;
-        if (xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
-            streak = s_snap.fail_streak;
-            xSemaphoreGive(s_mux);
-            if (streak > 0) {
-                uint32_t shift = streak > 5 ? 5 : streak;
-                wait_ms <<= shift;
-                if (wait_ms > 300000) wait_ms = 300000;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        scrape_ep(pick, parser);
     }
 }
 
 /* ------------------------------------------------------------------ public */
 
-esp_err_t poller_start(const char *url, int interval_s)
+esp_err_t poller_start(void)
 {
-    if (url == NULL) url = "";
-    strncpy(s_url, url, sizeof(s_url) - 1);
-    s_interval_s = interval_s > 0 ? interval_s : 10;
-
+    if (s_mux) return ESP_OK;                 /* already running */
     s_mux = xSemaphoreCreateMutex();
     if (s_mux == NULL) return ESP_ERR_NO_MEM;
 
-    strncpy(s_snap.status, "starting", sizeof(s_snap.status) - 1);
     reload_watches();          /* before the task exists, so no race */
 
     /* Core 0, above the LVGL task's priority 2 on core 1: network work
      * preempts nothing that draws. 8KB covers TLS handshake depth with room. */
     BaseType_t rc = xTaskCreatePinnedToCore(poller_task, "poller", 8192, NULL,
-                                            5, NULL, 0);
+                                            5, &s_task, 0);
     return rc == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
@@ -863,16 +937,10 @@ void poller_snapshot(poller_snap_t *out)
 
     /*
      * The UI is built before the poller task starts, so this must be safe
-     * with no mutex yet. Returning a zeroed snapshot with the labels filled
-     * in lets the dashboard lay itself out before any data exists.
+     * with no mutex yet: a zeroed snapshot lays out as "no data" everywhere.
      */
     if (s_mux == NULL) {
         memset(out, 0, sizeof(*out));
-        out->n = s_watch_n;
-        for (int i = 0; i < s_watch_n; i++) {
-            strncpy(out->m[i].label, s_watch[i].label, sizeof(out->m[i].label) - 1);
-        }
-        strncpy(out->status, "starting", sizeof(out->status) - 1);
         return;
     }
 
@@ -880,6 +948,16 @@ void poller_snapshot(poller_snap_t *out)
         *out = s_snap;
         xSemaphoreGive(s_mux);
     }
+}
+
+const poller_ep_status_t *poller_ep_status(const poller_snap_t *snap,
+                                           uint16_t ep_id)
+{
+    if (snap == NULL) return NULL;
+    for (int e = 0; e < snap->n_ep && e < CFG_MAX_ENDPOINTS; e++) {
+        if (snap->ep[e].ep_id == ep_id) return &snap->ep[e];
+    }
+    return NULL;
 }
 
 uint16_t poller_panel_id(int idx)
@@ -944,7 +1022,7 @@ static bool term_def_same(const term_rt_t *a, const term_rt_t *b)
  * first of three terms does not shift the other two onto each other's
  * baselines.
  */
-static void carry_state(watch_rt_t *w, watch_rt_t *old)
+static bool carry_state(watch_rt_t *w, watch_rt_t *old)
 {
     bool taken[CFG_MAX_TERMS] = { false };
     bool all = true;
@@ -969,7 +1047,7 @@ static void carry_state(watch_rt_t *w, watch_rt_t *old)
         dst->base_t  = src->base_t;
     }
 
-    if (!all) return;
+    if (!all) return false;
 
     /*
      * Presentation state, which only makes sense when every term survived:
@@ -988,6 +1066,78 @@ static void carry_state(watch_rt_t *w, watch_rt_t *old)
         w->n_child   = old->n_child;
         w->resort_in = old->resort_in;
     }
+    return true;
+}
+
+static uint32_t url_hash(const char *u)
+{
+    uint32_t h = 2166136261u;                     /* FNV-1a */
+    for (; *u; u++) { h ^= (uint8_t)*u; h *= 16777619u; }
+    return h;
+}
+
+/*
+ * Rebuild the endpoint table from config. Returns false if it cannot be
+ * allocated. Endpoints that keep their id keep their schedule and backoff;
+ * one whose URL or timeout changed has its keep-alive slot dropped, because
+ * the cached connection belongs to the old target.
+ */
+static bool reload_endpoints(const config_t *c)
+{
+    static ep_rt_t *prev;
+    if (s_ep == NULL) {
+        s_ep = heap_caps_calloc(CFG_MAX_ENDPOINTS, sizeof(ep_rt_t), MALLOC_CAP_SPIRAM);
+        prev = heap_caps_calloc(CFG_MAX_ENDPOINTS, sizeof(ep_rt_t), MALLOC_CAP_SPIRAM);
+        if (s_ep == NULL || prev == NULL) {
+            ESP_LOGE(TAG, "cannot allocate the endpoint table");
+            return false;
+        }
+    }
+    int prev_n = s_ep_n;
+    memcpy(prev, s_ep, sizeof(ep_rt_t) * CFG_MAX_ENDPOINTS);
+    memset(s_ep, 0, sizeof(ep_rt_t) * CFG_MAX_ENDPOINTS);
+    s_ep_n = 0;
+
+    int64_t now = now_ms();
+    for (int e = 0; e < c->n_endpoints && s_ep_n < CFG_MAX_ENDPOINTS; e++) {
+        const cfg_endpoint_t *ce = &c->endpoints[e];
+        ep_rt_t *ep = &s_ep[s_ep_n];
+        ep->id = ce->id;
+        strncpy(ep->url, ce->url, sizeof(ep->url) - 1);
+        ep->url_hash   = url_hash(ep->url);
+        ep->interval_s = ce->poll_s ? ce->poll_s
+                       : (c->device.poll_default_s ? c->device.poll_default_s : 10);
+        ep->timeout_ms = ce->timeout_ms ? ce->timeout_ms : 8000;
+        ep->next_due_ms = now;
+        ep->retargeted  = true;
+
+        for (int j = 0; j < prev_n; j++) {
+            if (prev[j].id != ep->id) continue;
+            if (prev[j].url_hash == ep->url_hash) {
+                /* Same target: keep its place in the schedule and its
+                 * backoff, so a save does not hammer a dead exporter. */
+                ep->next_due_ms = prev[j].next_due_ms;
+                ep->fail_streak = prev[j].fail_streak;
+                ep->retargeted  = false;
+            }
+            break;
+        }
+        /* Slot i now belongs to this endpoint; any other target's socket in
+         * it would be reused against the wrong host. */
+        if (s_ep_n >= prev_n || prev[s_ep_n].url_hash != ep->url_hash ||
+            prev[s_ep_n].timeout_ms != ep->timeout_ms) {
+            http_drop_slot(s_ep_n);
+        }
+        s_ep_n++;
+    }
+    for (int e = s_ep_n; e < prev_n; e++) http_drop_slot(e);
+    return true;
+}
+
+static int ep_index(uint16_t id)
+{
+    for (int e = 0; e < s_ep_n; e++) if (s_ep[e].id == id) return e;
+    return -1;
 }
 
 static void reload_watches(void)
@@ -1008,12 +1158,15 @@ static void reload_watches(void)
                                    MALLOC_CAP_SPIRAM);
         s_watch_prev = heap_caps_calloc(POLLER_MAX_WATCH, sizeof(watch_rt_t),
                                         MALLOC_CAP_SPIRAM);
-        if (s_watch == NULL || s_watch_prev == NULL) {
+        s_rows_tmp = heap_caps_calloc(POLLER_MAX_WATCH, sizeof(poller_metric_t),
+                                      MALLOC_CAP_SPIRAM);
+        if (s_watch == NULL || s_watch_prev == NULL || s_rows_tmp == NULL) {
             ESP_LOGE(TAG, "cannot allocate the watch list");
             s_watch_n = 0;
             return;
         }
     }
+    if (!reload_endpoints(c)) { s_watch_n = 0; return; }
 
     watch_rt_t *prev = s_watch;
     int prev_n = s_watch_n;
@@ -1031,12 +1184,18 @@ static void reload_watches(void)
          *
          * A counter needs a baseline before it can show a rate, so a screen
          * whose watches only start when you swipe to it greets you with a row
-         * of "warming up" every time. Watching them all costs one extra pass
-         * over an already-parsed scrape and nothing on the wire.
+         * of "warming up" every time. Watching them all costs a pass over
+         * their own endpoint's scrape; with auto-rotate it is also what makes
+         * each page land already drawn.
          */
+        int ei = ep_index(config_panel_ep(p));
+        if (ei < 0) continue;              /* no endpoint to read it from */
 
         watch_rt_t *w = &s_watch[s_watch_n];
         w->panel_id = p->id;
+        w->ep_idx   = (uint8_t)ei;
+        w->ep_id    = s_ep[ei].id;
+        w->ep_url_hash = s_ep[ei].url_hash;
         w->op       = p->op;
         w->multi    = p->multi;
         w->fmt      = p->fmt;
@@ -1082,16 +1241,80 @@ static void reload_watches(void)
             w->label[n] = '\0';
         }
 
+        bool found = false;
         for (int j = 0; j < prev_n; j++) {
             if (prev[j].panel_id != w->panel_id) continue;
-            carry_state(w, &prev[j]);
+            found = true;
+            /* Same terms read from a different place are different series:
+             * a baseline from the old host would be wrong, not just old. */
+            if (prev[j].ep_id == w->ep_id &&
+                prev[j].ep_url_hash == w->ep_url_hash) {
+                w->carried = carry_state(w, &prev[j]);
+            }
             break;
         }
+        /* Something new to read, so its endpoint is asked now rather than at
+         * its next turn -- a tile just placed should not sit empty for a whole
+         * poll interval. */
+        if (!found || !w->carried) s_ep[ei].next_due_ms = now_ms();
 
+        s_ep[ei].n_watches++;
         s_watch_n++;
     }
 
-    ESP_LOGI(TAG, "watching %d panels", s_watch_n);
+    /*
+     * Bring the snapshot into the new watch order. A row whose watch carried
+     * everything over keeps its numbers; anything else starts as "no data"
+     * until its endpoint is next scraped. Endpoint statuses are re-keyed the
+     * same way, by id.
+     */
+    if (s_mux && xSemaphoreTake(s_mux, portMAX_DELAY) == pdTRUE) {
+        for (int i = 0; i < s_watch_n; i++) {
+            const watch_rt_t *w = &s_watch[i];
+            poller_metric_t *m = &s_rows_tmp[i];
+            int from = -1;
+            if (w->carried) {
+                for (int j = 0; j < s_snap.n && j < POLLER_MAX_WATCH; j++) {
+                    if (s_snap.m[j].panel_id == w->panel_id) { from = j; break; }
+                }
+            }
+            if (from >= 0) {
+                *m = s_snap.m[from];
+            } else {
+                memset(m, 0, sizeof(*m));
+                m->state = MS_NO_DATA;
+            }
+            row_presentation(w, m);
+        }
+        memcpy(s_snap.m, s_rows_tmp, sizeof(poller_metric_t) * (size_t)s_watch_n);
+        s_snap.n = s_watch_n;
+
+        poller_ep_status_t old[CFG_MAX_ENDPOINTS];
+        int old_n = s_snap.n_ep;
+        memcpy(old, s_snap.ep, sizeof(old));
+        memset(s_snap.ep, 0, sizeof(s_snap.ep));
+        for (int e = 0; e < s_ep_n; e++) {
+            poller_ep_status_t *es = &s_snap.ep[e];
+            es->ep_id = s_ep[e].id;
+            if (!s_ep[e].retargeted) {
+                for (int j = 0; j < old_n; j++) {
+                    if (old[j].ep_id == es->ep_id) { *es = old[j]; break; }
+                }
+            }
+            if (s_ep[e].n_watches == 0) {
+                es->ok = false;
+                strncpy(es->status, "idle: no tiles use it", sizeof(es->status) - 1);
+            } else if (es->status[0] == '\0' ||
+                       strcmp(es->status, "idle: no tiles use it") == 0) {
+                strncpy(es->status, "starting", sizeof(es->status) - 1);
+            }
+        }
+        s_snap.n_ep = (uint8_t)s_ep_n;
+        s_snap.generation++;
+        xSemaphoreGive(s_mux);
+    }
+
+    ESP_LOGI(TAG, "watching %d panels across %d endpoints", s_watch_n, s_ep_n);
 }
 
 
@@ -1108,4 +1331,8 @@ uint32_t poller_generation(void)
  * panel id, so the one cycle of lag shows a tile as warming up rather than
  * showing it the wrong metric.
  */
-void poller_reload(void) { s_reload_req = true; }
+void poller_reload(void)
+{
+    s_reload_req = true;
+    if (s_task) xTaskNotifyGive(s_task);
+}

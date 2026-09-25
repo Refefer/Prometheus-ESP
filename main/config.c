@@ -219,8 +219,10 @@ static const char *const k_keys_endpoint[] = {
     "id", "name", "kind", "url", "poll_s", "timeout_ms",
     "auth", "insecure_tls", "enabled", NULL,
 };
-static const char *const k_keys_screen[] = { "title", "pinned", NULL };
+static const char *const k_keys_screen[] = { "title", "pinned", "ep", NULL };
 static const char *const k_keys_panel[] = {
+    /* "ep" is schema 2's per-panel endpoint: still read, and must agree with
+     * the panel's screen */
     "id", "ep", "title", "unit", "kind", "fmt", "op", "scale", "group", "prefix", "suffix", "ramp", "terms",
     "vmin", "vmax", "warn", "crit", "multi", "lower_is_worse",
     "screen", "col", "row", "w", "h",
@@ -276,8 +278,9 @@ static void write_presentation(FILE *f)
     for (int i = 0; i < s_cfg.n_screens; i++) {
         fputs("    { \"title\": ", f);
         write_escaped(f, s_cfg.screens[i].title);
-        fprintf(f, ", \"pinned\": %s }%s\n",
+        fprintf(f, ", \"pinned\": %s, \"ep\": %u }%s\n",
                 s_cfg.screens[i].pinned ? "true" : "false",
+                (unsigned)s_cfg.screens[i].ep_id,
                 i + 1 < s_cfg.n_screens ? "," : "");
     }
     fputs("  ],\n", f);
@@ -285,8 +288,7 @@ static void write_presentation(FILE *f)
     fputs("  \"panels\": [\n", f);
     for (int i = 0; i < s_cfg.n_panels; i++) {
         const cfg_panel_t *p = &s_cfg.panels[i];
-        fprintf(f, "    { \"id\": %u, \"ep\": %u", (unsigned)p->id,
-                (unsigned)p->ep_id);
+        fprintf(f, "    { \"id\": %u", (unsigned)p->id);
         fputs(", \"title\": ", f);
         write_escaped(f, p->title);
         fputs(", \"unit\": ", f);
@@ -495,6 +497,45 @@ static float get_float(const cJSON *o, const char *k)
 }
 
 /*
+ * Settle every screen's endpoint.
+ *
+ * Schema 2 put "ep" on each panel, with 0 meaning "whatever is being polled"
+ * -- which was always the first endpoint, the only one the firmware read. So
+ * 0 resolves to the first endpoint here, and a screen with no "ep" of its own
+ * takes the one its panels name. Panels on one screen that name different
+ * endpoints are refused: that is exactly the state a screen binding exists to
+ * rule out, and picking one would silently repoint the others.
+ */
+static void resolve_screen_eps(config_t *cfg, const bool *scr_has_ep,
+                               const uint16_t *pan_ep, const bool *pan_has_ep,
+                               parse_err_t *pe)
+{
+    uint16_t first = cfg->n_endpoints ? cfg->endpoints[0].id : 0;
+
+    for (int s = 0; s < cfg->n_screens; s++) {
+        cfg_screen_t *sc = &cfg->screens[s];
+        if (scr_has_ep[s] && sc->ep_id == 0) sc->ep_id = first;
+        bool bound = scr_has_ep[s];
+
+        for (int i = 0; i < cfg->n_panels; i++) {
+            if (cfg->panels[i].screen != s || !pan_has_ep[i]) continue;
+            uint16_t ep = pan_ep[i] ? pan_ep[i] : first;
+            if (!bound) {
+                sc->ep_id = ep;
+                bound = true;
+            } else if (ep != sc->ep_id) {
+                perr(pe, "screen %d mixes endpoints %u and %u; a screen shows "
+                         "one endpoint, so give it \"ep\" and drop \"ep\" "
+                         "from its panels", s, (unsigned)sc->ep_id,
+                     (unsigned)ep);
+                return;
+            }
+        }
+        if (!bound) sc->ep_id = first;
+    }
+}
+
+/*
  * `full` distinguishes a complete configuration from a layout document.
  *
  * A layout carries only screens and panels, so it is parsed over a copy of
@@ -568,6 +609,15 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
         }
     }
 
+    /*
+     * Endpoint bindings as the document states them, resolved onto screens
+     * once every panel has been read. A screen's own "ep" wins; failing that
+     * its panels' schema-2 "ep" decide, and they have to agree.
+     */
+    bool     scr_has_ep[CFG_MAX_SCREENS] = { false };
+    uint16_t pan_ep[CFG_MAX_PANELS];
+    bool     pan_has_ep[CFG_MAX_PANELS] = { false };
+
     arr = cJSON_GetObjectItem(root, "screens");
     if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) > 0) {
         cfg->n_screens = 0;
@@ -582,6 +632,11 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             memset(sc, 0, sizeof(*sc));
             get_str(it, "title", sc->title, sizeof(sc->title));
             sc->pinned = get_bool(it, "pinned", false);
+            const cJSON *ep = cJSON_GetObjectItem(it, "ep");
+            if (cJSON_IsNumber(ep)) {
+                sc->ep_id = (uint16_t)ep->valuedouble;
+                scr_has_ep[cfg->n_screens - 1] = true;
+            }
         }
     }
 
@@ -600,7 +655,9 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
             cfg_panel_t *p = &cfg->panels[cfg->n_panels];
             memset(p, 0, sizeof(*p));
             p->id    = (uint16_t)get_int(it, "id", cfg->next_id++);
-            p->ep_id = (uint16_t)get_int(it, "ep", 0);
+            const cJSON *pep = cJSON_GetObjectItem(it, "ep");
+            pan_has_ep[cfg->n_panels] = cJSON_IsNumber(pep);
+            pan_ep[cfg->n_panels] = cJSON_IsNumber(pep) ? (uint16_t)pep->valuedouble : 0;
             get_str(it, "sel", p->sel, sizeof(p->sel));
             get_str(it, "title", p->title, sizeof(p->title));
             get_str(it, "unit", p->unit, sizeof(p->unit));
@@ -683,6 +740,7 @@ static bool parse_into_ex(config_t *cfg, const char *json, size_t len, bool full
     }
 
     cJSON_Delete(root);
+    resolve_screen_eps(cfg, scr_has_ep, pan_ep, pan_has_ep, pe);
     return pe == NULL || !pe->bad;
 }
 
@@ -807,6 +865,49 @@ static bool validate(const config_t *c, char *err, size_t cap)
         snprintf(err, cap, "at least one screen is required");
         return false;
     }
+    if (c->device.rotate_dwell_s < 5 || c->device.rotate_dwell_s > 3600) {
+        snprintf(err, cap, "device.rotate_dwell_s is %u; it must be 5 to 3600 "
+                           "seconds", (unsigned)c->device.rotate_dwell_s);
+        return false;
+    }
+
+    for (int e = 0; e < c->n_endpoints; e++) {
+        for (int j = 0; j < e; j++) {
+            if (c->endpoints[j].id == c->endpoints[e].id) {
+                snprintf(err, cap, "endpoint id %u is used twice",
+                         (unsigned)c->endpoints[e].id);
+                return false;
+            }
+        }
+    }
+
+    for (int s = 0; s < c->n_screens; s++) {
+        uint16_t ep = c->screens[s].ep_id;
+        if (c->n_endpoints == 0) {
+            if (ep != 0) {
+                snprintf(err, cap, "screen %d names endpoint %u, and no "
+                                   "endpoints are configured", s, (unsigned)ep);
+                return false;
+            }
+            continue;
+        }
+        bool found = false;
+        char ids[64] = "";
+        size_t w = 0;
+        for (int e = 0; e < c->n_endpoints; e++) {
+            if (c->endpoints[e].id == ep) found = true;
+            if (w < sizeof(ids) - 8) {
+                w += (size_t)snprintf(ids + w, sizeof(ids) - w, "%s%u",
+                                      e ? " " : "", (unsigned)c->endpoints[e].id);
+            }
+        }
+        if (!found) {
+            snprintf(err, cap, "screen %d names endpoint %u, which does not "
+                               "exist; the endpoint ids are: %s",
+                     s, (unsigned)ep, ids);
+            return false;
+        }
+    }
 
     for (int i = 0; i < c->n_panels; i++) {
         const cfg_panel_t *p = &c->panels[i];
@@ -877,17 +978,6 @@ static bool validate(const config_t *c, char *err, size_t cap)
                      w_, (double)p->vmin, (double)p->vmax);
             return false;
         }
-        if (c->n_endpoints > 0 && p->ep_id != 0) {
-            bool found = false;
-            for (int e = 0; e < c->n_endpoints; e++) {
-                if (c->endpoints[e].id == p->ep_id) { found = true; break; }
-            }
-            if (!found) {
-                snprintf(err, cap, "%s names endpoint %u, which does not exist",
-                         w_, (unsigned)p->ep_id);
-                return false;
-            }
-        }
 
         for (int j = 0; j < i; j++) {
             const cfg_panel_t *o = &c->panels[j];
@@ -937,6 +1027,11 @@ esp_err_t config_apply_json(const char *json, size_t len, char *err, size_t cap)
         free(tmp);
         return ESP_ERR_INVALID_ARG;
     }
+
+    /* An older document has been read into the current shape, and it is the
+     * current shape that gets written back -- so say so, or GET /config
+     * returns "schema": 2 over screens that carry schema 3's "ep". */
+    tmp->schema = CFG_SCHEMA_VERSION;
 
     /* Whole or not at all. */
     s_cfg = *tmp;
@@ -1192,6 +1287,7 @@ esp_err_t config_layout_apply_json(const char *json, size_t len,
     if (tmp->n_screens == 0) {
         tmp->n_screens = 1;
         strncpy(tmp->screens[0].title, "Home", sizeof(tmp->screens[0].title) - 1);
+        tmp->screens[0].ep_id = tmp->n_endpoints ? tmp->endpoints[0].id : 0;
     }
     if (!validate(tmp, err, cap)) { free(tmp); return ESP_ERR_INVALID_ARG; }
 
@@ -1247,10 +1343,58 @@ void config_panel_remove(uint16_t id)
 bool config_has_panel(uint16_t ep_id, const char *sel)
 {
     for (int i = 0; i < s_cfg.n_panels; i++) {
-        if (s_cfg.panels[i].ep_id == ep_id &&
+        if (config_panel_ep(&s_cfg.panels[i]) == ep_id &&
             strcmp(s_cfg.panels[i].sel, sel) == 0) return true;
     }
     return false;
+}
+
+uint16_t config_screen_ep(uint8_t idx)
+{
+    return idx < s_cfg.n_screens ? s_cfg.screens[idx].ep_id : 0;
+}
+
+uint16_t config_panel_ep(const cfg_panel_t *p)
+{
+    return config_screen_ep(p->screen);
+}
+
+uint16_t config_default_ep(void)
+{
+    return s_cfg.n_endpoints ? s_cfg.endpoints[0].id : 0;
+}
+
+uint16_t config_screen_ep_for(uint8_t idx)
+{
+    for (int i = idx < s_cfg.n_screens ? idx : s_cfg.n_screens - 1; i >= 0; i--) {
+        if (config_endpoint_by_id(s_cfg.screens[i].ep_id)) {
+            return s_cfg.screens[i].ep_id;
+        }
+    }
+    return config_default_ep();
+}
+
+bool config_screen_set_endpoint(uint8_t idx, uint16_t ep_id)
+{
+    if (idx >= s_cfg.n_screens || config_endpoint_by_id(ep_id) == NULL) {
+        return false;
+    }
+    if (s_cfg.screens[idx].ep_id == ep_id) return true;
+    s_cfg.screens[idx].ep_id = ep_id;
+    config_touch();
+    return true;
+}
+
+void config_bind_unbound_screens(uint16_t ep_id)
+{
+    bool changed = false;
+    for (int i = 0; i < s_cfg.n_screens; i++) {
+        if (s_cfg.screens[i].ep_id == 0) {
+            s_cfg.screens[i].ep_id = ep_id;
+            changed = true;
+        }
+    }
+    if (changed) config_touch();
 }
 
 /*
@@ -1264,6 +1408,9 @@ uint32_t config_panel_fingerprint(const cfg_panel_t *p)
 {
     uint32_t h = 2166136261u;                     /* FNV-1a */
     #define FEED(byte) do { h ^= (uint32_t)(uint8_t)(byte); h *= 16777619u; } while (0)
+    /* Every byte of the endpoint id: feeding it whole truncated it to its low
+     * byte, so endpoints 1 and 257 looked like the same source. */
+    uint16_t ep = config_panel_ep(p);
     for (int k = 0; k < p->n_terms && k < CFG_MAX_TERMS; k++) {
         const cfg_term_t *t = &p->terms[k];
         for (const char *c = t->sel; *c; c++) FEED(*c);
@@ -1273,17 +1420,18 @@ uint32_t config_panel_fingerprint(const cfg_panel_t *p)
         const unsigned char *q = (const unsigned char *)&t->q;
         for (size_t i = 0; i < sizeof(t->q); i++) FEED(q[i]);
     }
-    FEED(p->op); FEED(p->multi ? 1 : 0); FEED(p->ep_id);
+    FEED(p->op); FEED(p->multi ? 1 : 0); FEED(ep & 0xFF); FEED(ep >> 8);
     #undef FEED
     return h;
 }
 
-bool config_ensure_screen(uint8_t idx)
+bool config_ensure_screen(uint8_t idx, uint16_t ep_id)
 {
     if (idx >= CFG_MAX_SCREENS) return false;
     while (s_cfg.n_screens <= idx) {
         cfg_screen_t *sc = &s_cfg.screens[s_cfg.n_screens];
         memset(sc, 0, sizeof(*sc));
+        sc->ep_id = ep_id;
         snprintf(sc->title, sizeof(sc->title), "Screen %u",
                  (unsigned)s_cfg.n_screens + 1);
         s_cfg.n_screens++;
@@ -1407,8 +1555,20 @@ cfg_endpoint_t *config_endpoint_add(void)
     return e;
 }
 
-void config_endpoint_remove(uint16_t id)
+int config_endpoint_screens(uint16_t id, uint8_t *out, int max)
 {
+    int n = 0;
+    for (int i = 0; i < s_cfg.n_screens; i++) {
+        if (s_cfg.screens[i].ep_id != id) continue;
+        if (out && n < max) out[n] = (uint8_t)i;
+        n++;
+    }
+    return n;
+}
+
+bool config_endpoint_remove(uint16_t id)
+{
+    if (config_endpoint_screens(id, NULL, 0) > 0) return false;
     for (int i = 0; i < s_cfg.n_endpoints; i++) {
         if (s_cfg.endpoints[i].id != id) continue;
         for (int j = i; j + 1 < s_cfg.n_endpoints; j++) {
@@ -1416,6 +1576,7 @@ void config_endpoint_remove(uint16_t id)
         }
         s_cfg.n_endpoints--;
         config_touch();
-        return;
+        return true;
     }
+    return false;
 }

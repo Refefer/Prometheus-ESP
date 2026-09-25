@@ -21,7 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CFG_SCHEMA_VERSION   2
+#define CFG_SCHEMA_VERSION   3
 #define CFG_MAX_TERMS        4
 #define CFG_MAX_ENDPOINTS    8
 /* A screen holds twelve 1x1 cells, so it cannot show more than twelve panels.
@@ -100,8 +100,11 @@ typedef struct {
 
 typedef struct {
     uint16_t    id;
-    uint16_t    ep_id;
     /*
+     * No endpoint here: a panel reads whichever endpoint its screen is bound
+     * to (config_panel_ep). Schema 2 carried "ep" per panel, which let one
+     * screen mix endpoints; it is migrated onto the screen on load.
+     *
      * Operands. A plain panel has one term; a derived panel has two and an
      * op. Schema 1 carried sel/sel_b/op/q/agg/window_s directly on the panel
      * and is migrated into this shape on load.
@@ -146,6 +149,13 @@ typedef struct {
 typedef struct {
     char    title[CFG_NAME_MAX];
     bool    pinned;      /* the auto-packer leaves a pinned screen alone */
+    /*
+     * The one endpoint every tile on this screen reads. Always a real
+     * endpoint id once any endpoint exists, and 0 only while none does --
+     * an omitted "ep" is resolved to the first endpoint at parse time, so
+     * nothing downstream has to interpret 0.
+     */
+    uint16_t ep_id;
 } cfg_screen_t;
 
 /*
@@ -205,7 +215,7 @@ void config_touch(void);
  * Write now, atomically, ON A WORKER TASK.
  *
  * Never write from the LVGL task: LittleFS plus stdio needs several KB of
- * stack and the LVGL task runs on 6KB with under 2KB of idle headroom, and a
+ * stack the LVGL task (10KB) does not have spare, and a
  * flash erase blocks for long enough to visibly stall rendering. Every caller
  * is a button handler or a timer running in that task, so this spawns a
  * short-lived writer and returns immediately.
@@ -249,8 +259,36 @@ cfg_term_t *config_term0(cfg_panel_t *p);
 
 cfg_panel_t *config_panel_add(void);
 void         config_panel_remove(uint16_t id);
-/* True if a selector is already on a screen -- the browser shows ticks. */
+/* True if a selector from this endpoint is already on some screen -- the
+ * browser shows ticks. */
 bool         config_has_panel(uint16_t ep_id, const char *sel);
+
+/* The endpoint a panel reads: its screen's. 0 if no endpoint exists yet. */
+uint16_t     config_panel_ep(const cfg_panel_t *p);
+
+/* A screen's endpoint, or 0 for a screen index that does not exist yet. */
+uint16_t     config_screen_ep(uint8_t idx);
+
+/* The endpoint new screens default to: the first one, or 0 if none. */
+uint16_t     config_default_ep(void);
+
+/*
+ * The endpoint a screen shows -- or, for the empty page past the last screen,
+ * the one it would show if a tile were placed there now: the screen before
+ * it's. Falls back to the default. The header, the footer and the metric
+ * browser all ask this, so they cannot disagree about what a page reads.
+ */
+uint16_t     config_screen_ep_for(uint8_t idx);
+
+/*
+ * Point a screen, and so every tile on it, at another endpoint. The tiles'
+ * fingerprints change with it, so their rates and history start over.
+ */
+bool         config_screen_set_endpoint(uint8_t idx, uint16_t ep_id);
+
+/* Bind every screen that has no endpoint (ep_id 0) to this one. Called when
+ * the first endpoint is created, so no screen is left pointing at nothing. */
+void         config_bind_unbound_screens(uint16_t ep_id);
 
 /* Place a new panel in the first free cell of its screen, or return false if
  * the screen is full. Spans come from the renderer's natural size. */
@@ -258,7 +296,8 @@ bool         config_has_panel(uint16_t ep_id, const char *sel);
  * Grows the screen list so `idx` names a real screen, and returns false if
  * that is beyond the limit. Panels may only name a screen that exists -- the
  * loader rejects a config where one does not -- so anything placing a panel
- * on a new screen has to call this first.
+ * on a new screen has to call this first. Screens it creates are bound to
+ * `ep_id`; a screen that already exists keeps its endpoint.
  */
 /*
  * A fingerprint of everything that determines a panel's numbers: its terms,
@@ -270,7 +309,7 @@ bool         config_has_panel(uint16_t ep_id, const char *sel);
  */
 uint32_t config_panel_fingerprint(const cfg_panel_t *p);
 
-bool config_ensure_screen(uint8_t idx);
+bool config_ensure_screen(uint8_t idx, uint16_t ep_id);
 
 bool config_place_panel(cfg_panel_t *p);
 
@@ -304,9 +343,10 @@ bool config_move_panel(cfg_panel_t *p, int col, int row);
 /*
  * A layout is the presentation half of the configuration -- screens and
  * panels -- saved under a name so the panel can be repurposed without
- * rebuilding it. Endpoints and device settings are deliberately NOT part of
- * one: switching what you are looking at should not change what you are
- * connected to.
+ * rebuilding it. Endpoint definitions and device settings are deliberately
+ * NOT part of one: switching what you are looking at should not change what
+ * you are connected to. Each screen does carry its endpoint's *id*, so a
+ * layout only applies on a device that has those endpoints.
  */
 int  config_layout_list(char names[][CFG_LAYOUT_NAME_MAX], int max);
 esp_err_t config_layout_save(const char *name);
@@ -340,7 +380,11 @@ void config_enum_values(const char *which, char *out, size_t cap);
 
 cfg_endpoint_t *config_endpoint_by_id(uint16_t id);
 cfg_endpoint_t *config_endpoint_add(void);
-void            config_endpoint_remove(uint16_t id);
+/* Refused (false) while any screen is bound to the endpoint: every screen
+ * must name a real one. */
+bool            config_endpoint_remove(uint16_t id);
+/* The screens bound to an endpoint, as indexes. Returns how many. */
+int             config_endpoint_screens(uint16_t id, uint8_t *out, int max);
 
 /* Copy the live config to config.bak, once the UI is up and the config has
  * proven loadable. The backup is then a known-good-BOOT config rather than

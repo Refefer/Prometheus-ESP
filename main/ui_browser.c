@@ -91,6 +91,19 @@ static uint8_t  s_pick_col, s_pick_row;
  * cell free" has to ask it about the same screen, or a tile is placed on top
  * of one the user cannot see. */
 static uint8_t  s_screen;
+/*
+ * The endpoint this browser lists and adds tiles from: the screen's own.
+ * While the user is choosing to repoint a screen that already has tiles, the
+ * candidate is s_pending_ep -- it is scanned so the confirmation can say what
+ * it lacks, and nothing is added or ticked until they decide.
+ */
+static uint16_t s_ep_id;
+static uint16_t s_pending_ep;
+static char     s_scan_url[CFG_URL_MAX];
+static bool     s_scan_ok;
+static char     s_scan_msg[96];
+static lv_obj_t *s_ep_dd, *s_confirm;
+static uint16_t s_dd_ids[CFG_MAX_ENDPOINTS];
 static void   (*s_on_pick)(uint16_t panel_id);
 static bool     s_select_mode;
 static void   (*s_on_select)(const char *sel);
@@ -98,6 +111,7 @@ static void   (*s_on_select)(const char *sel);
 static void refilter(void);
 static void render_rows(void);
 static void close_cb(lv_event_t *e);
+static void confirm_rebind(void);
 
 /* ------------------------------------------------------------- discovery */
 
@@ -214,9 +228,11 @@ static void discover_task(void *arg)
 {
     (void)arg;
 
-    const config_t *c = config_get();
-    char url[CFG_URL_MAX] = "";
-    if (c->n_endpoints) strncpy(url, c->endpoints[0].url, sizeof(url) - 1);
+    /* Copied by rescan_cb on the LVGL task, so this task never reads the
+     * config while a push might be replacing it. */
+    char url[CFG_URL_MAX];
+    strncpy(url, s_scan_url, sizeof(url) - 1);
+    url[sizeof(url) - 1] = '\0';
 
     const prom_text_sink_t sink = { NULL, NULL, discover_sample };
     prom_text_parser_t *p = prom_text_new(&sink, NULL, psram_alloc, psram_free);
@@ -244,8 +260,12 @@ static void discover_task(void *arg)
         if (s_root != NULL) {          /* the screen can be closed mid-scan */
             label_set_if_changed(s_status, msg);
             text_color_if_changed(s_status, s_cat_n ? COL_OK : COL_WARN);
+            s_scan_ok = url[0] && p && res.klass == HTTP_ERR_NONE && st.samples > 0;
+            strncpy(s_scan_msg, msg, sizeof(s_scan_msg) - 1);
+            s_scan_msg[sizeof(s_scan_msg) - 1] = '\0';
             refilter();
             render_rows();
+            if (s_pending_ep) confirm_rebind();
         }
         lvgl_port_unlock();
     }
@@ -274,10 +294,15 @@ static bool contains_ci(const char *hay, const char *needle)
     return false;
 }
 
-static uint16_t ep_id(void)
+static uint16_t ep_id(void) { return s_ep_id; }
+
+static bool screen_has_panels(uint8_t screen)
 {
     const config_t *c = config_get();
-    return c->n_endpoints ? c->endpoints[0].id : 0;
+    for (int i = 0; i < c->n_panels; i++) {
+        if (c->panels[i].sel[0] && c->panels[i].screen == screen) return true;
+    }
+    return false;
 }
 
 static void refilter(void)
@@ -347,12 +372,22 @@ static bool cell_span_free(const cfg_panel_t *me, uint8_t col, uint8_t row)
 static uint16_t add_panel_for(const cat_entry_t *e, bool at_cell,
                               uint8_t col, uint8_t row)
 {
+    /* Not while a repoint of this screen is awaiting an answer: the tile
+     * would land on whichever endpoint the answer turns out to be. */
+    if (s_pending_ep) return 0;
+    bool was_empty = !screen_has_panels(s_screen);
+
     cfg_panel_t *p = config_panel_add();
     if (p == NULL) return 0;
 
-    p->ep_id  = ep_id();
-    /* The screen has to exist before a panel can name it. */
-    if (!config_ensure_screen(s_screen)) { config_panel_remove(p->id); return 0; }
+    /* The screen has to exist before a panel can name it. A new screen is
+     * bound to the endpoint being browsed; an existing screen that had no
+     * tiles takes it too, since choosing one was the point of the picker. */
+    if (!config_ensure_screen(s_screen, ep_id())) {
+        config_panel_remove(p->id);
+        return 0;
+    }
+    if (was_empty) config_screen_set_endpoint(s_screen, ep_id());
     p->screen = s_screen;
     cfg_term_t *t0 = config_term0(p);
     strncpy(t0->sel, e->sel[0] ? e->sel : e->name, sizeof(t0->sel) - 1);
@@ -450,7 +485,7 @@ static void remove_panel_sel(const char *sel)
 {
     const config_t *c = config_get();
     for (int i = 0; i < c->n_panels; i++) {
-        if (c->panels[i].ep_id == ep_id() &&
+        if (config_panel_ep(&c->panels[i]) == ep_id() &&
             strcmp(c->panels[i].sel, sel) == 0) {
             config_panel_remove(c->panels[i].id);
             return;
@@ -719,6 +754,10 @@ static void rescan_cb(lv_event_t *e)
 {
     (void)e;
     if (s_scanning) return;
+    const cfg_endpoint_t *ep = config_endpoint_by_id(s_pending_ep ? s_pending_ep
+                                                                   : s_ep_id);
+    strncpy(s_scan_url, ep ? ep->url : "", sizeof(s_scan_url) - 1);
+    s_scan_url[sizeof(s_scan_url) - 1] = '\0';
     s_scanning = true;
     s_cat_n = 0;
     s_ser_n = 0;
@@ -727,6 +766,185 @@ static void rescan_cb(lv_event_t *e)
     label_set_if_changed(s_status, "scanning...");
     text_color_if_changed(s_status, COL_DIM);
     xTaskCreate(discover_task, "discover", 8192, NULL, 4, NULL);
+}
+
+/* ------------------------------------------------------ endpoint picker */
+
+/*
+ * Does the catalog just scanned carry this metric name? The catalog groups by
+ * family, so a histogram's _bucket/_sum/_count samples appear under the bare
+ * family name and have to be recognised by suffix.
+ */
+static bool catalog_has(const char *name, size_t len)
+{
+    static const char *const subs[] = { "_bucket", "_count", "_sum", "_created" };
+    for (int i = 0; i < s_cat_n; i++) {
+        size_t n = strlen(s_cat[i].name);
+        if (n == len && memcmp(s_cat[i].name, name, len) == 0) return true;
+        if (len <= n || memcmp(s_cat[i].name, name, n) != 0) continue;
+        for (size_t k = 0; k < sizeof(subs) / sizeof(subs[0]); k++) {
+            if (strlen(subs[k]) == len - n &&
+                memcmp(name + n, subs[k], len - n) == 0) return true;
+        }
+    }
+    return false;
+}
+
+static void confirm_close(void)
+{
+    if (s_confirm) { lv_obj_del(s_confirm); s_confirm = NULL; }
+}
+
+static void select_dd(uint16_t id)
+{
+    if (s_ep_dd == NULL) return;
+    for (int i = 0; i < CFG_MAX_ENDPOINTS; i++) {
+        if (s_dd_ids[i] == id) { lv_dropdown_set_selected(s_ep_dd, (uint16_t)i); return; }
+    }
+}
+
+static void keep_cb(lv_event_t *e)
+{
+    (void)e;
+    confirm_close();
+    s_pending_ep = 0;
+    select_dd(s_ep_id);
+    rescan_cb(NULL);                  /* back to what the screen reads */
+}
+
+static void switch_cb(lv_event_t *e)
+{
+    (void)e;
+    confirm_close();
+    uint16_t to = s_pending_ep;
+    s_pending_ep = 0;
+    /* The catalog on screen is already the new endpoint's. Every tile on the
+     * screen changes fingerprint with this, so their history restarts --
+     * which is what the confirmation said would happen. */
+    if (config_screen_set_endpoint(s_screen, to)) s_ep_id = to;
+    refilter();
+    render_rows();
+}
+
+/*
+ * Before a screen with tiles is pointed elsewhere, say what that costs: every
+ * rate and chart on it restarts, and any tile whose metric the new endpoint
+ * does not expose will show "not on endpoint" rather than a number. Built
+ * after the candidate has been scanned, so the list is what it really lacks.
+ */
+static void confirm_rebind(void)
+{
+    const cfg_endpoint_t *to   = config_endpoint_by_id(s_pending_ep);
+    const cfg_endpoint_t *from = config_endpoint_by_id(s_ep_id);
+    if (to == NULL || s_root == NULL) { s_pending_ep = 0; return; }
+    const char *to_n   = to->name[0] ? to->name : to->url;
+    const char *from_n = from ? (from->name[0] ? from->name : from->url) : "?";
+
+    char body[512];
+    size_t w = 0;
+    if (!s_scan_ok) {
+        w += (size_t)snprintf(body + w, sizeof(body) - w,
+                              "Could not reach '%.48s': %s.\n\nSwitch screen %u "
+                              "anyway? Rates and charts on it restart.",
+                              to_n, s_scan_msg, (unsigned)s_screen + 1);
+    } else {
+        const config_t *c = config_get();
+        int tiles = 0, lacking = 0;
+        char names[200] = "";
+        size_t nw = 0;
+        for (int i = 0; i < c->n_panels; i++) {
+            const cfg_panel_t *p = &c->panels[i];
+            if (!p->sel[0] || p->screen != s_screen) continue;
+            tiles++;
+            for (int k = 0; k < p->n_terms; k++) {
+                char scratch[CFG_SEL_MAX];
+                const char *name; uint16_t name_len;
+                prom_label_t labels[8]; uint8_t n_labels;
+                strncpy(scratch, p->terms[k].sel, sizeof(scratch) - 1);
+                scratch[sizeof(scratch) - 1] = '\0';
+                if (!prom_parse_selector(scratch, scratch, sizeof(scratch),
+                                         &name, &name_len, labels, 8, &n_labels)) {
+                    continue;
+                }
+                if (catalog_has(name, name_len)) continue;
+                lacking++;
+                if (nw + name_len + 8 < sizeof(names)) {
+                    nw += (size_t)snprintf(names + nw, sizeof(names) - nw, "%s%.*s",
+                                           nw ? ", " : "", (int)name_len, name);
+                } else if (nw + 5 < sizeof(names)) {
+                    nw += (size_t)snprintf(names + nw, sizeof(names) - nw, ", ...");
+                }
+                break;                 /* one missing term is enough per tile */
+            }
+        }
+        w += (size_t)snprintf(body + w, sizeof(body) - w,
+                              "Switch screen %u to '%.48s'? Rates and charts on "
+                              "this screen restart.", (unsigned)s_screen + 1, to_n);
+        if (lacking) {
+            snprintf(body + w, sizeof(body) - w,
+                     "\n\n'%.48s' does not expose: %s  (%d of %d tiles)",
+                     to_n, names, lacking, tiles);
+        }
+    }
+
+    confirm_close();
+    s_confirm = lv_obj_create(s_root);
+    lv_obj_set_size(s_confirm, SCR_W, SCR_H);
+    lv_obj_set_pos(s_confirm, 0, 0);
+    lv_obj_set_style_bg_color(s_confirm, COL_BG, 0);
+    lv_obj_set_style_bg_opa(s_confirm, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(s_confirm, 0, 0);
+    lv_obj_set_style_radius(s_confirm, 0, 0);
+    lv_obj_clear_flag(s_confirm, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_confirm, LV_OBJ_FLAG_GESTURE_BUBBLE);
+
+    lv_obj_t *card = make_card(s_confirm);
+    lv_obj_set_size(card, 620, 280);
+    lv_obj_set_pos(card, (SCR_W - 620) / 2, (SCR_H - 280) / 2);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *msg = make_label(card, FONT_M, COL_TEXT);
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, 620 - 2 * PAD_M - 16);
+    lv_obj_set_pos(msg, 8, 8);
+    lv_label_set_text(msg, body);
+
+    char keep_t[48], sw_t[48];
+    snprintf(keep_t, sizeof(keep_t), "Keep '%.24s'", from_n);
+    snprintf(sw_t, sizeof(sw_t), "Switch");
+    lv_obj_t *keep = make_btn(card, keep_t, keep_cb, NULL);
+    lv_obj_set_size(keep, 260, BTN_H);
+    lv_obj_set_pos(keep, 8, 280 - 2 * PAD_M - BTN_H - 8);
+    lv_obj_t *sw = make_btn_accent(card, sw_t, switch_cb, NULL);
+    lv_obj_set_size(sw, 200, BTN_H);
+    lv_obj_set_pos(sw, 620 - 2 * PAD_M - 200 - 8, 280 - 2 * PAD_M - BTN_H - 8);
+    ui_check_overlaps(card, "rebind confirm");
+}
+
+static void endpoint_pick_cb(lv_event_t *e)
+{
+    uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+    if (sel >= CFG_MAX_ENDPOINTS) return;
+    uint16_t id = s_dd_ids[sel];
+    if (id == s_ep_id && s_pending_ep == 0) return;
+    if (s_scanning) {
+        /* One scan at a time; put the picker back rather than queue. */
+        select_dd(s_pending_ep ? s_pending_ep : s_ep_id);
+        ui_toast("Still scanning -- try again in a moment", SEV_WARN, 2000);
+        return;
+    }
+
+    if (screen_has_panels(s_screen) && id != s_ep_id) {
+        /* Repointing tiles that exist: scan the candidate first, and ask. */
+        s_pending_ep = id;
+    } else {
+        /* Nothing on the screen yet: this just chooses what to browse. It is
+         * bound when the first tile is placed. */
+        s_pending_ep = 0;
+        s_ep_id = id;
+    }
+    s_page = 0;
+    rescan_cb(NULL);
 }
 
 static void close_cb(lv_event_t *e)
@@ -738,6 +956,8 @@ static void close_cb(lv_event_t *e)
     lv_obj_del(s_root);
     s_root = NULL;
     s_status = s_count = s_search_btn = s_page_lbl = NULL;
+    s_ep_dd = s_confirm = NULL;
+    s_pending_ep = 0;
     for (int i = 0; i < ROWS_VISIBLE; i++) s_row[i] = NULL;
 
     /* The catalog is a browsing-time structure; holding ~150KB of PSRAM for a
@@ -777,6 +997,7 @@ void ui_browser_open_pick(uint8_t screen, uint8_t col, uint8_t row,
 {
     if (s_root) return;
     s_screen      = screen;
+    s_ep_id       = config_screen_ep_for(screen);
     s_pick_mode   = true;
     s_select_mode = false;
     s_picked      = false;
@@ -787,9 +1008,12 @@ void ui_browser_open_pick(uint8_t screen, uint8_t col, uint8_t row,
     browser_build("Pick a metric");
 }
 
-void ui_browser_open_select(void (*on_select)(const char *sel))
+void ui_browser_open_select(uint8_t screen, void (*on_select)(const char *sel))
 {
     if (s_root) return;
+    /* Both operands of a derived tile come from its screen's endpoint. */
+    s_screen      = screen;
+    s_ep_id       = config_screen_ep_for(screen);
     s_pick_mode   = false;
     s_select_mode = true;
     s_picked      = false;
@@ -802,6 +1026,7 @@ void ui_browser_open(uint8_t screen, void (*on_close)(void))
 {
     if (s_root) return;
     s_screen      = screen;
+    s_ep_id       = config_screen_ep_for(screen);
     s_pick_mode   = false;
     s_select_mode = false;
     s_on_close = on_close;
@@ -868,22 +1093,48 @@ static void browser_build(const char *heading)
     lv_obj_set_pos(s_back_btn, GRID_MX, 46);
     hidden_if_changed(s_back_btn, true);
 
+    /*
+     * With more than one endpoint the row makes room for a picker naming the
+     * one being browsed -- which is also how a screen is pointed at another.
+     * Not in select mode: a derived tile's operands share one endpoint.
+     */
+    const config_t *cfg = config_get();
+    bool picker = cfg->n_endpoints > 1 && !s_select_mode;
+
     s_search_btn = make_btn(s_root, "search...", search_cb, NULL);
-    lv_obj_set_size(s_search_btn, 268, 40);
+    lv_obj_set_size(s_search_btn, picker ? 180 : 268, 40);
     lv_obj_set_pos(s_search_btn, GRID_MX + 62, 46);
 
     /* Named for what it does, not for its state: "all"/"selected" alone reads
      * as a label rather than a control, and this is the button you want when
      * removing tiles. */
     lv_obj_t *selbtn = make_btn(s_root, "Show: all", selected_cb, NULL);
-    lv_obj_set_size(selbtn, 190, 40);
-    lv_obj_set_pos(selbtn, GRID_MX + 340, 46);
+    lv_obj_set_size(selbtn, picker ? 150 : 190, 40);
+    lv_obj_set_pos(selbtn, GRID_MX + (picker ? 250 : 340), 46);
 
-    lv_obj_t *rescan = make_btn(s_root, LV_SYMBOL_REFRESH "  Rescan",
+    lv_obj_t *rescan = make_btn(s_root, picker ? LV_SYMBOL_REFRESH
+                                               : LV_SYMBOL_REFRESH "  Rescan",
                                 rescan_cb, NULL);
-    lv_obj_set_size(rescan, 150, 40);
-    /* Clear of "Show:" above, which ends at GRID_MX+530. */
-    lv_obj_set_pos(rescan, GRID_MX + 540, 46);
+    lv_obj_set_size(rescan, picker ? 56 : 150, 40);
+    /* Clear of "Show:" beside it. */
+    lv_obj_set_pos(rescan, GRID_MX + (picker ? 408 : 540), 46);
+
+    if (picker) {
+        char opts[CFG_MAX_ENDPOINTS * (CFG_NAME_MAX + 1)];
+        size_t w = 0;
+        int sel = 0;
+        for (int i = 0; i < cfg->n_endpoints && i < CFG_MAX_ENDPOINTS; i++) {
+            const cfg_endpoint_t *ep = &cfg->endpoints[i];
+            w += (size_t)snprintf(opts + w, sizeof(opts) - w, "%s%s",
+                                  i ? "\n" : "", ep->name[0] ? ep->name : ep->url);
+            s_dd_ids[i] = ep->id;
+            if (ep->id == s_ep_id) sel = i;
+        }
+        s_ep_dd = make_dropdown(s_root, opts, endpoint_pick_cb, NULL);
+        lv_obj_set_size(s_ep_dd, SCR_W - 2 * GRID_MX - 472, 40);
+        lv_obj_set_pos(s_ep_dd, GRID_MX + 472, 46);
+        lv_dropdown_set_selected(s_ep_dd, (uint16_t)sel);
+    }
 
     /* A fixed pool of rows, rewritten in place and paged.
      *

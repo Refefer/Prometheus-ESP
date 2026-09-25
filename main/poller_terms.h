@@ -1,9 +1,10 @@
 /*
  * Runtime state for one term of a panel. Internal to the poller.
  *
- * Kept in PSRAM rather than .bss: four terms per panel across twelve panels
- * is ~85KB, and internal SRAM is the scarce resource on this board (task
- * stacks cannot live in PSRAM, so everything that can be moved out should be).
+ * Kept in PSRAM rather than .bss: a term is ~2KB, four per panel across
+ * twelve panels in two swapped lists is ~190KB of it, and internal SRAM is the
+ * scarce resource on this board (task stacks cannot live in PSRAM, so
+ * everything that can be moved out should be).
  */
 #pragma once
 

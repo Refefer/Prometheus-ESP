@@ -12,6 +12,7 @@
 #include "prom_text.h"
 #include "secrets.h"
 #include "storage.h"
+#include "sysmon.h"
 #include "ui_layout.h"
 #include "wifi_mgr.h"
 
@@ -19,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "webcfg";
@@ -416,26 +418,63 @@ static esp_err_t get_status(httpd_req_t *req)
     wifi_mgr_info(ip, sizeof(ip), &rssi);
     const config_t *c = config_get();
 
-    char out[320];
     /* Whether the clock has been set is a thing you want to know from here:
      * it is the one piece of device state with no other readout. */
     char clk[40] = "";
     timekeep_now(clk, sizeof(clk), NULL, 0);
 
+    char out[400];
     snprintf(out, sizeof(out),
              "{\"app\":\"prometheus-panel\",\"ip\":\"%s\",\"rssi\":%d,"
-             "\"uptime_s\":%llu,\"panels\":%u,\"endpoints\":%u,"
-             "\"schema\":%u,\"free_internal\":%u,\"free_psram\":%u,"
-             "\"clock\":\"%s\",\"tz\":\"%s\"}\n",
+             "\"uptime_s\":%llu,\"panels\":%u,"
+             "\"schema\":%u,\"free_internal\":%u,\"min_free_internal\":%u,"
+             "\"free_psram\":%u,\"cpu\":[%d,%d],"
+             "\"clock\":\"%s\",\"tz\":\"%s\",\"endpoints\":[",
              ip, (int)rssi,
              (unsigned long long)(esp_timer_get_time() / 1000000),
-             (unsigned)c->n_panels, (unsigned)c->n_endpoints,
+             (unsigned)c->n_panels,
              (unsigned)CFG_SCHEMA_VERSION,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)sysmon_sram_min(),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             sysmon_cpu_pct(0), sysmon_cpu_pct(1),
              clk[0] ? clk : "unsynced", c->device.tz);
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, out);
+    httpd_resp_sendstr_chunk(req, out);
+
+    /*
+     * One entry per endpoint: how its scraping is going. Names and states
+     * only -- URLs stay behind the token with the rest of the config. The
+     * snapshot is ~7KB, so it is borrowed from PSRAM rather than taken from
+     * this task's stack or from internal SRAM for good.
+     */
+    poller_snap_t *snap = heap_caps_malloc(sizeof(*snap), MALLOC_CAP_SPIRAM);
+    if (snap) poller_snapshot(snap);
+    int64_t now = esp_timer_get_time() / 1000;
+    for (int i = 0; i < c->n_endpoints; i++) {
+        const cfg_endpoint_t *e = &c->endpoints[i];
+        const poller_ep_status_t *es = snap ? poller_ep_status(snap, e->id) : NULL;
+        char name[CFG_NAME_MAX * 2], st[112];
+        json_escape(e->name, name, sizeof(name));
+        json_escape(es ? es->status : "unknown", st, sizeof(st));
+        snprintf(out, sizeof(out),
+                 "%s{\"id\":%u,\"name\":\"%s\",\"ok\":%s,\"status\":\"%s\","
+                 "\"latency_ms\":%u,\"samples\":%u,\"bytes\":%llu,"
+                 "\"fail_streak\":%u,\"last_ok_s\":%lld}",
+                 i ? "," : "", (unsigned)e->id, name,
+                 es && es->ok ? "true" : "false", st,
+                 es ? (unsigned)es->latency_ms : 0u,
+                 es ? (unsigned)es->samples : 0u,
+                 es ? (unsigned long long)es->body_bytes : 0ull,
+                 es ? (unsigned)es->fail_streak : 0u,
+                 es && es->last_ok_ms ? (long long)((now - es->last_ok_ms) / 1000)
+                                      : -1LL);
+        httpd_resp_sendstr_chunk(req, out);
+    }
+    if (snap) heap_caps_free(snap);
+
+    httpd_resp_sendstr_chunk(req, "]}\n");
+    httpd_resp_send_chunk(req, NULL, 0);
     return ESP_OK;
 }
 
@@ -526,11 +565,39 @@ static esp_err_t get_metrics_seen(httpd_req_t *req)
     if (!authorised(req)) return deny(req);
 
     const config_t *c = config_get();
-    if (c->n_endpoints == 0 || c->endpoints[0].url[0] == '\0') {
+    if (c->n_endpoints == 0) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "{\"error\":\"no endpoint configured\"}\n");
         return ESP_OK;
     }
+
+    /* ?ep=<id> picks the endpoint; without it, the first. */
+    const cfg_endpoint_t *ep = &c->endpoints[0];
+    char q[32], v[8];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "ep", v, sizeof(v)) == ESP_OK) {
+        ep = config_endpoint_by_id((uint16_t)atoi(v));
+        if (ep == NULL) {
+            char ids[64] = "";
+            size_t w = 0;
+            for (int i = 0; i < c->n_endpoints && w < sizeof(ids) - 8; i++) {
+                w += (size_t)snprintf(ids + w, sizeof(ids) - w, "%s%u",
+                                      i ? ", " : "", (unsigned)c->endpoints[i].id);
+            }
+            char out[128];
+            snprintf(out, sizeof(out), "{\"error\":\"there is no endpoint %s; "
+                     "the endpoint ids are: %s\"}\n", v, ids);
+            httpd_resp_set_status(req, "404 Not Found");
+            httpd_resp_sendstr(req, out);
+            return ESP_OK;
+        }
+    }
+    /* Copied: the scrape takes seconds, and a push may replace the config
+     * underneath it. */
+    char url[CFG_URL_MAX];
+    strncpy(url, ep->url, sizeof(url) - 1);
+    url[sizeof(url) - 1] = '\0';
+    uint16_t ep_id = ep->id;
 
     seen_ctx_t ctx = { .v = heap_caps_malloc(sizeof(seen_t) * SEEN_MAX_NAMES,
                                              MALLOC_CAP_SPIRAM), .n = 0 };
@@ -547,7 +614,7 @@ static esp_err_t get_metrics_seen(httpd_req_t *req)
     if (p) {
         /* Slot -1: a one-shot connection, so interrogating never disturbs the
          * socket the live poller is using. */
-        http_get_stream(-1, c->endpoints[0].url, NULL, seen_chunk, p, 12000, &res);
+        http_get_stream(-1, url, NULL, seen_chunk, p, 12000, &res);
         prom_text_finish(p, &st);
         prom_text_free(p);
     }
@@ -556,23 +623,24 @@ static esp_err_t get_metrics_seen(httpd_req_t *req)
         heap_caps_free(ctx.v);
         httpd_resp_set_status(req, "502 Bad Gateway");
         char eurl[CFG_URL_MAX * 2];
-        json_escape(c->endpoints[0].url, eurl, sizeof(eurl));
+        json_escape(url, eurl, sizeof(eurl));
         char out[CFG_URL_MAX * 2 + 80];
-        snprintf(out, sizeof(out), "{\"error\":\"%s\",\"url\":\"%s\"}\n",
-                 http_err_text(res.klass), eurl);
+        snprintf(out, sizeof(out), "{\"error\":\"%s\",\"ep\":%u,\"url\":\"%s\"}\n",
+                 http_err_text(res.klass), (unsigned)ep_id, eurl);
         httpd_resp_sendstr(req, out);
         return ESP_OK;
     }
 
     httpd_resp_set_type(req, "application/json");
     char esc_url[CFG_URL_MAX * 2];
-    json_escape(c->endpoints[0].url, esc_url, sizeof(esc_url));
+    json_escape(url, esc_url, sizeof(esc_url));
 
     char head[CFG_URL_MAX * 2 + 128];
     snprintf(head, sizeof(head),
-             "{\"url\":\"%s\",\"samples\":%u,\"bytes\":%u,\"families\":%d,"
-             "\"metrics\":[\n",
-             esc_url, (unsigned)st.samples, (unsigned)res.bytes, ctx.n);
+             "{\"ep\":%u,\"url\":\"%s\",\"samples\":%u,\"bytes\":%u,"
+             "\"families\":%d,\"metrics\":[\n",
+             (unsigned)ep_id, esc_url, (unsigned)st.samples, (unsigned)res.bytes,
+             ctx.n);
     httpd_resp_sendstr_chunk(req, head);
 
     /* Streamed a family at a time: 384 of them with selectors would be a
@@ -689,11 +757,11 @@ static esp_err_t get_index(httpd_req_t *req)
 "  \"describe\": \"GET /schema for the config format\",\n"
 "  \"auth\": \"all routes except / and /status need the X-Auth header; the token is on the device under the gear button\",\n"
 "  \"routes\": [\n"
-"    { \"method\": \"GET\",    \"path\": \"/status\",                  \"auth\": false, \"desc\": \"identity, uptime, free memory\" },\n"
+"    { \"method\": \"GET\",    \"path\": \"/status\",                  \"auth\": false, \"desc\": \"identity, uptime, free memory, CPU per core, each endpoint's scrape status\" },\n"
 "    { \"method\": \"GET\",    \"path\": \"/schema\",                  \"auth\": false, \"desc\": \"the configuration format and its legal values\" },\n"
 "    { \"method\": \"GET\",    \"path\": \"/config\",                  \"auth\": true,  \"desc\": \"the whole running configuration\" },\n"
 "    { \"method\": \"POST\",   \"path\": \"/config\",                  \"auth\": true,  \"desc\": \"replace it; validated whole or rejected\" },\n"
-"    { \"method\": \"GET\",    \"path\": \"/metrics-seen\",            \"auth\": true,  \"desc\": \"what the polled endpoint currently exposes\" },\n"
+"    { \"method\": \"GET\",    \"path\": \"/metrics-seen?ep={id}\",    \"auth\": true,  \"desc\": \"what an endpoint currently exposes; without ep, the first endpoint\" },\n"
 "    { \"method\": \"GET\",    \"path\": \"/layouts\",                 \"auth\": true,  \"desc\": \"stored layouts and which is active\" },\n"
 "    { \"method\": \"GET\",    \"path\": \"/layouts/{name}\",          \"auth\": true,  \"desc\": \"one layout's screens and panels\" },\n"
 "    { \"method\": \"POST\",   \"path\": \"/layouts/{name}\",          \"auth\": true,  \"desc\": \"apply the posted layout and store it under {name}\" },\n"
@@ -743,6 +811,11 @@ static esp_err_t get_schema(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
 "  \"fields\": {\n"
 "    \"device.tz\":      \"POSIX TZ string for the header clock, e.g. UTC0, PST8PDT,M3.2.0,M11.1.0 or GMT0BST,M3.5.0/1,M10.5.0. Note the sign convention is inverted from UTC offsets: PST8PDT means UTC-8. Only the clock reads it; every measurement is taken against the monotonic clock.\",\n"
+"    \"device.rotate_enabled\": \"page through the screens that have tiles on a timer; a touch pauses it for one dwell, and it never runs while a sheet is open\",\n"
+"    \"device.rotate_dwell_s\":  \"seconds each screen stays up while rotating, 5-3600\",\n"
+"    \"endpoint.id\":    \"what screens name in ep; kept stable across edits\",\n"
+"    \"screen.ep\":      \"the endpoint id this screen polls; every tile on the screen reads it, so one screen never mixes endpoints. Omitted means the first endpoint\",\n"
+"    \"panel.ep\":       \"legacy (schema 2): accepted, but must equal its screen's ep; the device writes ep on screens only\",\n"
 "    \"panel.sel\":      \"mirror of terms[0].sel; written by the device, ignored on input\",\n"
 "    \"panel.col/row\":  \"top-left cell; col+w and row+h must stay inside the grid\",\n"
 "    \"panel.screen\":   \"which page the tile is on, swiped between; must be < the length of screens[]\",\n"
@@ -767,7 +840,8 @@ static esp_err_t get_schema(httpd_req_t *req)
 "    \"A counter whose exporter updates on a log interval steps rather than flows; a window smooths it.\",\n"
 "    \"A push is applied whole or rejected, and the error names the offending panel.\"\n"
 "    ,\"Cells are per screen, so two panels may share col/row if their screen differs.\"\n"
-"    ,\"Every screen's panels are polled whether or not it is the one on display, so a page is warm when you swipe to it.\"\n"
+"    ,\"Every screen's panels are polled whether or not it is the one on display, so a page is warm when you swipe to it.\"\n""    ,\"Each endpoint is polled on its own interval and backs off on its own when it fails, so one exporter being down slows only the screens that read it.\"\n"
+"    ,\"A layout carries each screen's endpoint id, so it applies only on a device that has endpoints with those ids.\"\n"
 "  ],\n"
 "  \"example\": { \"title\": \"prefix hit rate\", \"kind\": \"gauge\", \"fmt\": \"percent\",\n"
 "    \"op\": \"share\", \"col\": 0, \"row\": 0, \"w\": 1, \"h\": 1,\n"
